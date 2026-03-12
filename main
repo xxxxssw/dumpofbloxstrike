@@ -27,12 +27,17 @@ const settings = {
 	wireframe: false,
 	fovCircleEnabled: true,
 	distanceColoring: true,
-	teamCheckEnabled: true
+	teamCheckEnabled: true,
+	visibleCheckEnabled: true,
+	triggerbotEnabled: false,
+	triggerbotOnRightMouse: true
 };
 
 const config = {
 	aimSmoothing: 0.22,
-	fovRadius: 220
+	fovRadius: 220,
+	triggerDelayMs: 35,
+	triggerHoldMs: 26
 };
 
 const keyToSetting = {
@@ -43,7 +48,10 @@ const keyToSetting = {
 	KeyK: 'wireframe',
 	KeyJ: 'fovCircleEnabled',
 	KeyU: 'distanceColoring',
-	KeyI: 'teamCheckEnabled'
+	KeyI: 'teamCheckEnabled',
+	KeyO: 'visibleCheckEnabled',
+	KeyT: 'triggerbotEnabled',
+	KeyY: 'triggerbotOnRightMouse'
 };
 
 const gui = createGUI();
@@ -134,6 +142,136 @@ function angleDelta( a, b ) {
 
 function lerpAngle( a, b, t ) {
 	return a + angleDelta( b, a ) * t;
+}
+
+const raycaster = new THREE.Raycaster();
+const rayDirection = new THREE.Vector3();
+const rayOrigin = new THREE.Vector3();
+let triggerTimeout = 0;
+let triggerReleaseTimeout = 0;
+
+function isPartOfPlayer( candidate, player ) {
+
+	let node = candidate;
+	while ( node ) {
+
+		if ( node === player ) {
+
+			return true;
+
+		}
+
+		node = node.parent;
+
+	}
+
+	return false;
+
+}
+
+function getAimWorldPosition( player, outVector ) {
+
+	if ( player?.children?.[ 0 ]?.children?.[ 0 ]?.localToWorld ) {
+
+		outVector.setScalar( 0 );
+		player.children[ 0 ].children[ 0 ].localToWorld( outVector );
+		return outVector;
+
+	}
+
+	outVector.copy( player.position );
+	outVector.y += 9;
+	return outVector;
+
+}
+
+function isVisibleTarget( myPlayer, targetPlayer, camera ) {
+
+	if ( ! settings.visibleCheckEnabled || ! camera ) {
+
+		return true;
+
+	}
+
+	getAimWorldPosition( targetPlayer, tempVector );
+	camera.getWorldPosition( rayOrigin );
+	rayDirection.copy( tempVector ).sub( rayOrigin );
+	const rayDistance = rayDirection.length();
+
+	if ( rayDistance <= 0.001 ) {
+
+		return true;
+
+	}
+
+	rayDirection.normalize();
+	raycaster.set( rayOrigin, rayDirection );
+	raycaster.far = rayDistance - 0.05;
+
+	const hits = raycaster.intersectObjects( scene.children, true );
+
+	for ( let i = 0; i < hits.length; i ++ ) {
+
+		const hitObject = hits[ i ].object;
+
+		if ( isPartOfPlayer( hitObject, myPlayer ) || isPartOfPlayer( hitObject, targetPlayer ) || hitObject === line || hitObject === targetPlayer.box ) {
+
+			continue;
+
+		}
+
+		return false;
+
+	}
+
+	return true;
+
+}
+
+function updateTriggerbot( shouldShoot ) {
+
+	if ( ! settings.triggerbotEnabled ) {
+
+		return;
+
+	}
+
+	if ( settings.triggerbotOnRightMouse && ! rightMouseDown ) {
+
+		return;
+
+	}
+
+	if ( ! shouldShoot || triggerTimeout ) {
+
+		return;
+
+	}
+
+	const gameCanvas = document.querySelector( 'canvas#game-overlay, #game-overlay canvas, canvas' );
+	if ( ! gameCanvas ) {
+
+		return;
+
+	}
+
+	const downEvent = new MouseEvent( 'mousedown', { button: 0, bubbles: true, cancelable: true } );
+	const upEvent = new MouseEvent( 'mouseup', { button: 0, bubbles: true, cancelable: true } );
+
+	triggerTimeout = window.setTimeout( () => {
+
+		triggerTimeout = 0;
+		gameCanvas.dispatchEvent( downEvent );
+
+		triggerReleaseTimeout = window.setTimeout( () => {
+
+			triggerReleaseTimeout = 0;
+			gameCanvas.dispatchEvent( upEvent );
+
+		}, config.triggerHoldMs );
+
+	}, config.triggerDelayMs );
+
 }
 
 
@@ -235,6 +373,7 @@ function animate() {
 	const players = [];
 
 	let myPlayer;
+	let myCamera;
 
 	for ( let i = 0; i < scene.children.length; i ++ ) {
 
@@ -247,6 +386,7 @@ function animate() {
 				if ( child.children[ 0 ].children[ 0 ].type === 'PerspectiveCamera' ) {
 
 					myPlayer = child;
+					myCamera = child.children[ 0 ].children[ 0 ];
 
 				} else {
 
@@ -276,6 +416,7 @@ function animate() {
 
 	let targetPlayer;
 	let bestScore = Infinity;
+	let targetVisible = false;
 
 	tempObject.matrix.copy( myPlayer.matrix ).invert()
 
@@ -351,6 +492,14 @@ function animate() {
 
 		}
 
+		const visibleTarget = isVisibleTarget( myPlayer, player, myCamera );
+
+		if ( settings.visibleCheckEnabled && ! visibleTarget ) {
+
+			continue;
+
+		}
+
 		tempObject.position.copy( myPlayer.position );
 		tempObject.lookAt( player.position.x, player.position.y + 9, player.position.z );
 		const desiredPitch = - tempObject.rotation.x;
@@ -371,6 +520,7 @@ function animate() {
 
 			targetPlayer = player;
 			bestScore = angularDistance;
+			targetVisible = visibleTarget;
 
 		}
 
@@ -381,6 +531,8 @@ function animate() {
 	line.geometry.setDrawRange( 0, counter );
 
 	line.visible = settings.espLines;
+
+	updateTriggerbot( targetPlayer !== undefined && targetVisible );
 
 	if ( settings.aimbotEnabled === false || ( settings.aimbotOnRightMouse && ! rightMouseDown ) || targetPlayer === undefined ) {
 
@@ -586,6 +738,12 @@ el.innerHTML = `<style>
 	[U] to toggle distance ESP colors
 	<br>
 	[I] to toggle team check
+	<br>
+	[O] to toggle visible check
+	<br>
+	[T] to toggle triggerbot
+	<br>
+	[Y] triggerbot on right click only
 	<br>
 	[,] / [.] change smoothing
 	<br>
