@@ -26,7 +26,8 @@ const settings = {
 	espLines: true, 
 	wireframe: false,
 	fovCircleEnabled: true,
-	distanceColoring: true
+	distanceColoring: true,
+	teamCheckEnabled: true
 };
 
 const config = {
@@ -41,7 +42,8 @@ const keyToSetting = {
 	KeyN: 'espLines', 
 	KeyK: 'wireframe',
 	KeyJ: 'fovCircleEnabled',
-	KeyU: 'distanceColoring'
+	KeyU: 'distanceColoring',
+	KeyI: 'teamCheckEnabled'
 };
 
 const gui = createGUI();
@@ -132,6 +134,71 @@ function angleDelta( a, b ) {
 
 function lerpAngle( a, b, t ) {
 	return a + angleDelta( b, a ) * t;
+}
+
+
+function getTeamValue( player ) {
+
+	const teamKeys = [ 'team', 'teamId', 'teamNum', 'tm', 't' ];
+
+	for ( let i = 0; i < teamKeys.length; i ++ ) {
+
+		const value = player?.[ teamKeys[ i ] ];
+		if ( value !== undefined && value !== null && value !== '' ) {
+
+			return value;
+
+		}
+
+	}
+
+	const nestedCandidates = [
+		player?.children?.[ 0 ],
+		player?.children?.[ 0 ]?.children?.[ 0 ],
+		player?.objInstances?.[ 0 ]
+	];
+
+	for ( let i = 0; i < nestedCandidates.length; i ++ ) {
+
+		const candidate = nestedCandidates[ i ];
+		if ( ! candidate ) continue;
+
+		for ( let j = 0; j < teamKeys.length; j ++ ) {
+
+			const value = candidate[ teamKeys[ j ] ];
+			if ( value !== undefined && value !== null && value !== '' ) {
+
+				return value;
+
+			}
+
+		}
+
+	}
+
+	return undefined;
+
+}
+
+function isEnemyPlayer( myPlayer, otherPlayer ) {
+
+	if ( ! settings.teamCheckEnabled ) {
+
+		return true;
+
+	}
+
+	const myTeam = getTeamValue( myPlayer );
+	const otherTeam = getTeamValue( otherPlayer );
+
+	if ( myTeam === undefined || otherTeam === undefined ) {
+
+		return true;
+
+	}
+
+	return myTeam !== otherTeam;
+
 }
 
 let injectTimer = null;
@@ -236,6 +303,15 @@ function animate() {
 				player.add( line );
 
 			}
+
+			continue;
+
+		}
+
+
+		if ( ! isEnemyPlayer( myPlayer, player ) ) {
+
+			player.box.visible = false;
 
 			continue;
 
@@ -508,6 +584,8 @@ el.innerHTML = `<style>
 	[J] to toggle FOV circle
 	<br>
 	[U] to toggle distance ESP colors
+	<br>
+	[I] to toggle team check
 	<br>
 	[,] / [.] change smoothing
 	<br>
