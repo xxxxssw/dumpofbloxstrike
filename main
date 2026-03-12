@@ -24,7 +24,20 @@ const settings = {
 	aimbotOnRightMouse: false,
 	espEnabled: true, 
 	espLines: true, 
-	wireframe: false
+	wireframe: false,
+	fovCircleEnabled: true,
+	distanceColoring: true,
+	teamCheckEnabled: true,
+	visibleCheckEnabled: true,
+	triggerbotEnabled: false,
+	triggerbotOnRightMouse: true
+};
+
+const config = {
+	aimSmoothing: 0.22,
+	fovRadius: 220,
+	triggerDelayMs: 35,
+	triggerHoldMs: 26
 };
 
 const keyToSetting = {
@@ -32,7 +45,13 @@ const keyToSetting = {
 	KeyL: 'aimbotOnRightMouse',  
 	KeyM: 'espEnabled', 
 	KeyN: 'espLines', 
-	KeyK: 'wireframe'
+	KeyK: 'wireframe',
+	KeyJ: 'fovCircleEnabled',
+	KeyU: 'distanceColoring',
+	KeyI: 'teamCheckEnabled',
+	KeyO: 'visibleCheckEnabled',
+	KeyT: 'triggerbotEnabled',
+	KeyY: 'triggerbotOnRightMouse'
 };
 
 const gui = createGUI();
@@ -87,31 +106,12 @@ tempObject.rotation.order = 'YXZ';
 
 const geometry = new THREE.EdgesGeometry( new THREE.BoxGeometry( 5, 15, 5 ).translate( 0, 7.5, 0 ) );
 
-const material = new THREE.RawShaderMaterial( {
-	vertexShader: `
-
-	attribute vec3 position;
-
-	uniform mat4 projectionMatrix;
-	uniform mat4 modelViewMatrix;
-
-	void main() {
-
-		gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
-		gl_Position.z = 1.0;
-
-	}
-
-	`,
-	fragmentShader: `
-
-	void main() {
-
-		gl_FragColor = vec4( 1.0, 0.0, 0.0, 1.0 );
-
-	}
-
-	`
+const material = new THREE.LineBasicMaterial( {
+	color: 0xff0000,
+	depthTest: false,
+	transparent: true,
+	opacity: 0.95,
+	toneMapped: false
 } );
 
 const line = new THREE.LineSegments( new THREE.BufferGeometry(), material );
@@ -119,7 +119,225 @@ const line = new THREE.LineSegments( new THREE.BufferGeometry(), material );
 line.frustumCulled = false;
 
 const linePositions = new THREE.BufferAttribute( new Float32Array( 100 * 2 * 3 ), 3 );
+const lineColors = new THREE.BufferAttribute( new Float32Array( 100 * 2 * 3 ), 3 );
 line.geometry.setAttribute( 'position', linePositions );
+line.geometry.setAttribute( 'color', lineColors );
+line.material = new THREE.LineBasicMaterial( {
+	vertexColors: true,
+	depthTest: false,
+	transparent: true,
+	opacity: 0.9,
+	toneMapped: false
+} );
+
+const fovEl = document.createElement( 'div' );
+fovEl.className = 'fov-circle';
+window.addEventListener( 'DOMContentLoaded', () => {
+	document.body.appendChild( fovEl );
+} );
+
+function angleDelta( a, b ) {
+	return Math.atan2( Math.sin( a - b ), Math.cos( a - b ) );
+}
+
+function lerpAngle( a, b, t ) {
+	return a + angleDelta( b, a ) * t;
+}
+
+const raycaster = new THREE.Raycaster();
+const rayDirection = new THREE.Vector3();
+const rayOrigin = new THREE.Vector3();
+let triggerTimeout = 0;
+let triggerReleaseTimeout = 0;
+
+function isPartOfPlayer( candidate, player ) {
+
+	let node = candidate;
+	while ( node ) {
+
+		if ( node === player ) {
+
+			return true;
+
+		}
+
+		node = node.parent;
+
+	}
+
+	return false;
+
+}
+
+function getAimWorldPosition( player, outVector ) {
+
+	if ( player?.children?.[ 0 ]?.children?.[ 0 ]?.localToWorld ) {
+
+		outVector.setScalar( 0 );
+		player.children[ 0 ].children[ 0 ].localToWorld( outVector );
+		return outVector;
+
+	}
+
+	outVector.copy( player.position );
+	outVector.y += 9;
+	return outVector;
+
+}
+
+function isVisibleTarget( myPlayer, targetPlayer, camera ) {
+
+	if ( ! settings.visibleCheckEnabled || ! camera ) {
+
+		return true;
+
+	}
+
+	getAimWorldPosition( targetPlayer, tempVector );
+	camera.getWorldPosition( rayOrigin );
+	rayDirection.copy( tempVector ).sub( rayOrigin );
+	const rayDistance = rayDirection.length();
+
+	if ( rayDistance <= 0.001 ) {
+
+		return true;
+
+	}
+
+	rayDirection.normalize();
+	raycaster.set( rayOrigin, rayDirection );
+	raycaster.far = rayDistance - 0.05;
+
+	const hits = raycaster.intersectObjects( scene.children, true );
+
+	for ( let i = 0; i < hits.length; i ++ ) {
+
+		const hitObject = hits[ i ].object;
+
+		if ( isPartOfPlayer( hitObject, myPlayer ) || isPartOfPlayer( hitObject, targetPlayer ) || hitObject === line || hitObject === targetPlayer.box ) {
+
+			continue;
+
+		}
+
+		return false;
+
+	}
+
+	return true;
+
+}
+
+function updateTriggerbot( shouldShoot ) {
+
+	if ( ! settings.triggerbotEnabled ) {
+
+		return;
+
+	}
+
+	if ( settings.triggerbotOnRightMouse && ! rightMouseDown ) {
+
+		return;
+
+	}
+
+	if ( ! shouldShoot || triggerTimeout ) {
+
+		return;
+
+	}
+
+	const gameCanvas = document.querySelector( 'canvas#game-overlay, #game-overlay canvas, canvas' );
+	if ( ! gameCanvas ) {
+
+		return;
+
+	}
+
+	const downEvent = new MouseEvent( 'mousedown', { button: 0, bubbles: true, cancelable: true } );
+	const upEvent = new MouseEvent( 'mouseup', { button: 0, bubbles: true, cancelable: true } );
+
+	triggerTimeout = window.setTimeout( () => {
+
+		triggerTimeout = 0;
+		gameCanvas.dispatchEvent( downEvent );
+
+		triggerReleaseTimeout = window.setTimeout( () => {
+
+			triggerReleaseTimeout = 0;
+			gameCanvas.dispatchEvent( upEvent );
+
+		}, config.triggerHoldMs );
+
+	}, config.triggerDelayMs );
+
+}
+
+
+function getTeamValue( player ) {
+
+	const teamKeys = [ 'team', 'teamId', 'teamNum', 'tm', 't' ];
+
+	for ( let i = 0; i < teamKeys.length; i ++ ) {
+
+		const value = player?.[ teamKeys[ i ] ];
+		if ( value !== undefined && value !== null && value !== '' ) {
+
+			return value;
+
+		}
+
+	}
+
+	const nestedCandidates = [
+		player?.children?.[ 0 ],
+		player?.children?.[ 0 ]?.children?.[ 0 ],
+		player?.objInstances?.[ 0 ]
+	];
+
+	for ( let i = 0; i < nestedCandidates.length; i ++ ) {
+
+		const candidate = nestedCandidates[ i ];
+		if ( ! candidate ) continue;
+
+		for ( let j = 0; j < teamKeys.length; j ++ ) {
+
+			const value = candidate[ teamKeys[ j ] ];
+			if ( value !== undefined && value !== null && value !== '' ) {
+
+				return value;
+
+			}
+
+		}
+
+	}
+
+	return undefined;
+
+}
+
+function isEnemyPlayer( myPlayer, otherPlayer ) {
+
+	if ( ! settings.teamCheckEnabled ) {
+
+		return true;
+
+	}
+
+	const myTeam = getTeamValue( myPlayer );
+	const otherTeam = getTeamValue( otherPlayer );
+
+	if ( myTeam === undefined || otherTeam === undefined ) {
+
+		return true;
+
+	}
+
+	return myTeam !== otherTeam;
+
+}
 
 let injectTimer = null;
 
@@ -155,6 +373,7 @@ function animate() {
 	const players = [];
 
 	let myPlayer;
+	let myCamera;
 
 	for ( let i = 0; i < scene.children.length; i ++ ) {
 
@@ -167,6 +386,7 @@ function animate() {
 				if ( child.children[ 0 ].children[ 0 ].type === 'PerspectiveCamera' ) {
 
 					myPlayer = child;
+					myCamera = child.children[ 0 ].children[ 0 ];
 
 				} else {
 
@@ -195,7 +415,8 @@ function animate() {
 	let counter = 0;
 
 	let targetPlayer;
-	let minDistance = Infinity;
+	let bestScore = Infinity;
+	let targetVisible = false;
 
 	tempObject.matrix.copy( myPlayer.matrix ).invert()
 
@@ -205,7 +426,7 @@ function animate() {
 
 		if ( ! player.box ) {
 
-			const box = new THREE.LineSegments( geometry, material );
+			const box = new THREE.LineSegments( geometry, material.clone() );
 			box.frustumCulled = false;
 
 			player.add( box );
@@ -228,37 +449,90 @@ function animate() {
 
 		}
 
-		linePositions.setXYZ( counter ++, 0, 10, - 5 );
+
+		if ( ! isEnemyPlayer( myPlayer, player ) ) {
+
+			player.box.visible = false;
+
+			continue;
+
+		}
+
+		linePositions.setXYZ( counter, 0, 10, - 5 );
+		lineColors.setXYZ( counter ++, 1, 1, 1 );
 
 		tempVector.copy( player.position );
 		tempVector.y += 9;
 		tempVector.applyMatrix4( tempObject.matrix );
 
 		linePositions.setXYZ(
-			counter ++,
+			counter,
 			tempVector.x,
 			tempVector.y,
 			tempVector.z
 		);
 
+		const distance = player.position.distanceTo( myPlayer.position );
+		const distanceRatio = Math.max( 0, Math.min( 1, distance / 140 ) );
+		const r = settings.distanceColoring ? 1 : 1;
+		const g = settings.distanceColoring ? 1 - distanceRatio : 0;
+		const b = settings.distanceColoring ? 0.15 : 0;
+		lineColors.setXYZ( counter ++, r, g, b );
+
 		player.visible = settings.espEnabled || player.visible;
 		player.box.visible = settings.espEnabled;
 
-		const distance = player.position.distanceTo( myPlayer.position );
+		if ( settings.distanceColoring ) {
 
-		if ( distance < minDistance ) {
+			player.box.material.color.setRGB( r, g, b );
+
+		} else {
+
+			player.box.material.color.set( 0xff0000 );
+
+		}
+
+		const visibleTarget = isVisibleTarget( myPlayer, player, myCamera );
+
+		if ( settings.visibleCheckEnabled && ! visibleTarget ) {
+
+			continue;
+
+		}
+
+		tempObject.position.copy( myPlayer.position );
+		tempObject.lookAt( player.position.x, player.position.y + 9, player.position.z );
+		const desiredPitch = - tempObject.rotation.x;
+		const desiredYaw = tempObject.rotation.y + Math.PI;
+		const currentPitch = myPlayer.children[ 0 ].rotation.x;
+		const currentYaw = myPlayer.rotation.y;
+		const yawError = angleDelta( desiredYaw, currentYaw );
+		const pitchError = desiredPitch - currentPitch;
+		const angularDistance = Math.hypot( yawError, pitchError );
+
+		if ( settings.fovCircleEnabled && angularDistance * 480 > config.fovRadius ) {
+
+			continue;
+
+		}
+
+		if ( angularDistance < bestScore ) {
 
 			targetPlayer = player;
-			minDistance = distance;
+			bestScore = angularDistance;
+			targetVisible = visibleTarget;
 
 		}
 
 	}
 
 	linePositions.needsUpdate = true;
+	lineColors.needsUpdate = true;
 	line.geometry.setDrawRange( 0, counter );
 
 	line.visible = settings.espLines;
+
+	updateTriggerbot( targetPlayer !== undefined && targetVisible );
 
 	if ( settings.aimbotEnabled === false || ( settings.aimbotOnRightMouse && ! rightMouseDown ) || targetPlayer === undefined ) {
 
@@ -271,11 +545,18 @@ function animate() {
 	targetPlayer.children[ 0 ].children[ 0 ].localToWorld( tempVector );
 
 	tempObject.position.copy( myPlayer.position );
-
 	tempObject.lookAt( tempVector );
 
-	myPlayer.children[ 0 ].rotation.x = - tempObject.rotation.x;
-	myPlayer.rotation.y = tempObject.rotation.y + Math.PI;
+	const targetPitch = - tempObject.rotation.x;
+	const targetYaw = tempObject.rotation.y + Math.PI;
+	const smooth = Math.max( 0.01, Math.min( 1, config.aimSmoothing ) );
+
+	myPlayer.children[ 0 ].rotation.x += ( targetPitch - myPlayer.children[ 0 ].rotation.x ) * smooth;
+	myPlayer.rotation.y = lerpAngle( myPlayer.rotation.y, targetYaw, smooth );
+
+	fovEl.style.display = settings.fovCircleEnabled ? '' : 'none';
+	fovEl.style.width = `${config.fovRadius * 2}px`;
+	fovEl.style.height = `${config.fovRadius * 2}px`;
 
 }
 
@@ -428,6 +709,18 @@ el.innerHTML = `<style>
 	font-weight: bolder;
 }
 
+.fov-circle {
+	position: fixed;
+	left: 50%;
+	top: 50%;
+	transform: translate(-50%, -50%);
+	border: 2px solid rgba(0, 255, 0, 0.7);
+	border-radius: 50%;
+	pointer-events: none;
+	z-index: 999998;
+	box-shadow: 0 0 10px rgba(0, 255, 0, 0.35);
+}
+
 </style>
 <div class="msg" style="display: none;"></div>
 <div class="dialog">${`<div class="close" onclick="this.parentNode.style.display='none';"></div>
@@ -439,6 +732,22 @@ el.innerHTML = `<style>
 	[V] to toggle ESP
 	<br>
 	[N] to toggle ESP Lines
+	<br>
+	[J] to toggle FOV circle
+	<br>
+	[U] to toggle distance ESP colors
+	<br>
+	[I] to toggle team check
+	<br>
+	[O] to toggle visible check
+	<br>
+	[T] to toggle triggerbot
+	<br>
+	[Y] triggerbot on right click only
+	<br>
+	[,] / [.] change smoothing
+	<br>
+	[-] / [=] change FOV radius
 	<br>
 	[L] to toggle aimbot on <br>right mouse hold
 	<br>
@@ -507,6 +816,26 @@ window.addEventListener( 'keyup', function ( event ) {
 			toggleElementVisibility( dialogEl );
 			break;
 
+		case 'Comma':
+			config.aimSmoothing = Math.max( 0.05, config.aimSmoothing - 0.02 );
+			showMsg( 'Aim Smoothing', config.aimSmoothing.toFixed( 2 ) );
+			break;
+
+		case 'Period':
+			config.aimSmoothing = Math.min( 1, config.aimSmoothing + 0.02 );
+			showMsg( 'Aim Smoothing', config.aimSmoothing.toFixed( 2 ) );
+			break;
+
+		case 'Minus':
+			config.fovRadius = Math.max( 80, config.fovRadius - 10 );
+			showMsg( 'FOV Radius', config.fovRadius );
+			break;
+
+		case 'Equal':
+			config.fovRadius = Math.min( 400, config.fovRadius + 10 );
+			showMsg( 'FOV Radius', config.fovRadius );
+			break;
+
 	}
 
 } );
@@ -519,7 +848,15 @@ function toggleElementVisibility( el ) {
 
 function showMsg( name, bool ) {
 
-	msgEl.innerText = name + ': ' + ( bool ? 'ON' : 'OFF' );
+	if ( typeof bool === 'boolean' ) {
+
+		msgEl.innerText = name + ': ' + ( bool ? 'ON' : 'OFF' );
+
+	} else {
+
+		msgEl.innerText = name + ': ' + bool;
+
+	}
 
 	msgEl.style.display = 'none';
 	void msgEl.offsetWidth;
