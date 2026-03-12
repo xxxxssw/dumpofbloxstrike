@@ -24,7 +24,14 @@ const settings = {
 	aimbotOnRightMouse: false,
 	espEnabled: true, 
 	espLines: true, 
-	wireframe: false
+	wireframe: false,
+	fovCircleEnabled: true,
+	distanceColoring: true
+};
+
+const config = {
+	aimSmoothing: 0.22,
+	fovRadius: 220
 };
 
 const keyToSetting = {
@@ -32,7 +39,9 @@ const keyToSetting = {
 	KeyL: 'aimbotOnRightMouse',  
 	KeyM: 'espEnabled', 
 	KeyN: 'espLines', 
-	KeyK: 'wireframe'
+	KeyK: 'wireframe',
+	KeyJ: 'fovCircleEnabled',
+	KeyU: 'distanceColoring'
 };
 
 const gui = createGUI();
@@ -87,31 +96,12 @@ tempObject.rotation.order = 'YXZ';
 
 const geometry = new THREE.EdgesGeometry( new THREE.BoxGeometry( 5, 15, 5 ).translate( 0, 7.5, 0 ) );
 
-const material = new THREE.RawShaderMaterial( {
-	vertexShader: `
-
-	attribute vec3 position;
-
-	uniform mat4 projectionMatrix;
-	uniform mat4 modelViewMatrix;
-
-	void main() {
-
-		gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
-		gl_Position.z = 1.0;
-
-	}
-
-	`,
-	fragmentShader: `
-
-	void main() {
-
-		gl_FragColor = vec4( 1.0, 0.0, 0.0, 1.0 );
-
-	}
-
-	`
+const material = new THREE.LineBasicMaterial( {
+	color: 0xff0000,
+	depthTest: false,
+	transparent: true,
+	opacity: 0.95,
+	toneMapped: false
 } );
 
 const line = new THREE.LineSegments( new THREE.BufferGeometry(), material );
@@ -119,7 +109,30 @@ const line = new THREE.LineSegments( new THREE.BufferGeometry(), material );
 line.frustumCulled = false;
 
 const linePositions = new THREE.BufferAttribute( new Float32Array( 100 * 2 * 3 ), 3 );
+const lineColors = new THREE.BufferAttribute( new Float32Array( 100 * 2 * 3 ), 3 );
 line.geometry.setAttribute( 'position', linePositions );
+line.geometry.setAttribute( 'color', lineColors );
+line.material = new THREE.LineBasicMaterial( {
+	vertexColors: true,
+	depthTest: false,
+	transparent: true,
+	opacity: 0.9,
+	toneMapped: false
+} );
+
+const fovEl = document.createElement( 'div' );
+fovEl.className = 'fov-circle';
+window.addEventListener( 'DOMContentLoaded', () => {
+	document.body.appendChild( fovEl );
+} );
+
+function angleDelta( a, b ) {
+	return Math.atan2( Math.sin( a - b ), Math.cos( a - b ) );
+}
+
+function lerpAngle( a, b, t ) {
+	return a + angleDelta( b, a ) * t;
+}
 
 let injectTimer = null;
 
@@ -195,7 +208,7 @@ function animate() {
 	let counter = 0;
 
 	let targetPlayer;
-	let minDistance = Infinity;
+	let bestScore = Infinity;
 
 	tempObject.matrix.copy( myPlayer.matrix ).invert()
 
@@ -205,7 +218,7 @@ function animate() {
 
 		if ( ! player.box ) {
 
-			const box = new THREE.LineSegments( geometry, material );
+			const box = new THREE.LineSegments( geometry, material.clone() );
 			box.frustumCulled = false;
 
 			player.add( box );
@@ -228,34 +241,67 @@ function animate() {
 
 		}
 
-		linePositions.setXYZ( counter ++, 0, 10, - 5 );
+		linePositions.setXYZ( counter, 0, 10, - 5 );
+		lineColors.setXYZ( counter ++, 1, 1, 1 );
 
 		tempVector.copy( player.position );
 		tempVector.y += 9;
 		tempVector.applyMatrix4( tempObject.matrix );
 
 		linePositions.setXYZ(
-			counter ++,
+			counter,
 			tempVector.x,
 			tempVector.y,
 			tempVector.z
 		);
 
+		const distance = player.position.distanceTo( myPlayer.position );
+		const distanceRatio = Math.max( 0, Math.min( 1, distance / 140 ) );
+		const r = settings.distanceColoring ? 1 : 1;
+		const g = settings.distanceColoring ? 1 - distanceRatio : 0;
+		const b = settings.distanceColoring ? 0.15 : 0;
+		lineColors.setXYZ( counter ++, r, g, b );
+
 		player.visible = settings.espEnabled || player.visible;
 		player.box.visible = settings.espEnabled;
 
-		const distance = player.position.distanceTo( myPlayer.position );
+		if ( settings.distanceColoring ) {
 
-		if ( distance < minDistance ) {
+			player.box.material.color.setRGB( r, g, b );
+
+		} else {
+
+			player.box.material.color.set( 0xff0000 );
+
+		}
+
+		tempObject.position.copy( myPlayer.position );
+		tempObject.lookAt( player.position.x, player.position.y + 9, player.position.z );
+		const desiredPitch = - tempObject.rotation.x;
+		const desiredYaw = tempObject.rotation.y + Math.PI;
+		const currentPitch = myPlayer.children[ 0 ].rotation.x;
+		const currentYaw = myPlayer.rotation.y;
+		const yawError = angleDelta( desiredYaw, currentYaw );
+		const pitchError = desiredPitch - currentPitch;
+		const angularDistance = Math.hypot( yawError, pitchError );
+
+		if ( settings.fovCircleEnabled && angularDistance * 480 > config.fovRadius ) {
+
+			continue;
+
+		}
+
+		if ( angularDistance < bestScore ) {
 
 			targetPlayer = player;
-			minDistance = distance;
+			bestScore = angularDistance;
 
 		}
 
 	}
 
 	linePositions.needsUpdate = true;
+	lineColors.needsUpdate = true;
 	line.geometry.setDrawRange( 0, counter );
 
 	line.visible = settings.espLines;
@@ -271,11 +317,18 @@ function animate() {
 	targetPlayer.children[ 0 ].children[ 0 ].localToWorld( tempVector );
 
 	tempObject.position.copy( myPlayer.position );
-
 	tempObject.lookAt( tempVector );
 
-	myPlayer.children[ 0 ].rotation.x = - tempObject.rotation.x;
-	myPlayer.rotation.y = tempObject.rotation.y + Math.PI;
+	const targetPitch = - tempObject.rotation.x;
+	const targetYaw = tempObject.rotation.y + Math.PI;
+	const smooth = Math.max( 0.01, Math.min( 1, config.aimSmoothing ) );
+
+	myPlayer.children[ 0 ].rotation.x += ( targetPitch - myPlayer.children[ 0 ].rotation.x ) * smooth;
+	myPlayer.rotation.y = lerpAngle( myPlayer.rotation.y, targetYaw, smooth );
+
+	fovEl.style.display = settings.fovCircleEnabled ? '' : 'none';
+	fovEl.style.width = `${config.fovRadius * 2}px`;
+	fovEl.style.height = `${config.fovRadius * 2}px`;
 
 }
 
@@ -428,6 +481,18 @@ el.innerHTML = `<style>
 	font-weight: bolder;
 }
 
+.fov-circle {
+	position: fixed;
+	left: 50%;
+	top: 50%;
+	transform: translate(-50%, -50%);
+	border: 2px solid rgba(0, 255, 0, 0.7);
+	border-radius: 50%;
+	pointer-events: none;
+	z-index: 999998;
+	box-shadow: 0 0 10px rgba(0, 255, 0, 0.35);
+}
+
 </style>
 <div class="msg" style="display: none;"></div>
 <div class="dialog">${`<div class="close" onclick="this.parentNode.style.display='none';"></div>
@@ -439,6 +504,14 @@ el.innerHTML = `<style>
 	[V] to toggle ESP
 	<br>
 	[N] to toggle ESP Lines
+	<br>
+	[J] to toggle FOV circle
+	<br>
+	[U] to toggle distance ESP colors
+	<br>
+	[,] / [.] change smoothing
+	<br>
+	[-] / [=] change FOV radius
 	<br>
 	[L] to toggle aimbot on <br>right mouse hold
 	<br>
@@ -507,6 +580,26 @@ window.addEventListener( 'keyup', function ( event ) {
 			toggleElementVisibility( dialogEl );
 			break;
 
+		case 'Comma':
+			config.aimSmoothing = Math.max( 0.05, config.aimSmoothing - 0.02 );
+			showMsg( 'Aim Smoothing', config.aimSmoothing.toFixed( 2 ) );
+			break;
+
+		case 'Period':
+			config.aimSmoothing = Math.min( 1, config.aimSmoothing + 0.02 );
+			showMsg( 'Aim Smoothing', config.aimSmoothing.toFixed( 2 ) );
+			break;
+
+		case 'Minus':
+			config.fovRadius = Math.max( 80, config.fovRadius - 10 );
+			showMsg( 'FOV Radius', config.fovRadius );
+			break;
+
+		case 'Equal':
+			config.fovRadius = Math.min( 400, config.fovRadius + 10 );
+			showMsg( 'FOV Radius', config.fovRadius );
+			break;
+
 	}
 
 } );
@@ -519,7 +612,15 @@ function toggleElementVisibility( el ) {
 
 function showMsg( name, bool ) {
 
-	msgEl.innerText = name + ': ' + ( bool ? 'ON' : 'OFF' );
+	if ( typeof bool === 'boolean' ) {
+
+		msgEl.innerText = name + ': ' + ( bool ? 'ON' : 'OFF' );
+
+	} else {
+
+		msgEl.innerText = name + ': ' + bool;
+
+	}
 
 	msgEl.style.display = 'none';
 	void msgEl.offsetWidth;
