@@ -25,12 +25,16 @@ delete window.THREE;
 const settings = {
     aimbotEnabled: true,
     aimbotOnRightMouse: false,
+    visibleOnlyAimbot: true,
     espEnabled: true,
     espLines: true,
     espSkeleton: true,
     espNames: true,
     espDistance: true,
+    espHealth: true,
+    espWeapon: true,
     espChams: true,
+    visCheck: true,
     wireframe: false,
 };
 
@@ -40,6 +44,10 @@ const keyToSetting = {
     KeyV: 'espEnabled',
     KeyN: 'espLines',
     KeyJ: 'espSkeleton',
+    KeyU: 'visCheck',
+    KeyI: 'visibleOnlyAimbot',
+    KeyO: 'espHealth',
+    KeyP: 'espWeapon',
     KeyC: 'espChams',
     KeyK: 'wireframe',
 };
@@ -115,7 +123,7 @@ const material = new THREE.RawShaderMaterial({
     `
 });
 
-const chamsMaterial = new THREE.MeshBasicMaterial({
+const chamsVisibleMaterial = new THREE.MeshBasicMaterial({
     color: 0xc83232,
     wireframe: false,
     transparent: true,
@@ -123,6 +131,9 @@ const chamsMaterial = new THREE.MeshBasicMaterial({
     depthTest: false,
     toneMapped: false,
 });
+
+const chamsHiddenMaterial = chamsVisibleMaterial.clone();
+chamsHiddenMaterial.color.set(0xf1c40f);
 
 const line = new THREE.LineSegments(new THREE.BufferGeometry(), material);
 line.frustumCulled = false;
@@ -150,12 +161,77 @@ function createOverlay() {
 // HELPERS
 // ═══════════════════════════════════════════
 const _pv = new THREE.Vector3();
+const raycaster = new THREE.Raycaster();
+const rayOrigin = new THREE.Vector3();
+const rayTarget = new THREE.Vector3();
+const rayDirection = new THREE.Vector3();
 
 function w2s(pos, cam) {
     if (!cam || !canvas2d) return null;
     _pv.copy(pos).project(cam);
     if (_pv.z > 1) return null;
     return { x: (_pv.x * canvas2d.width / 2) + canvas2d.width / 2, y: -(_pv.y * canvas2d.height / 2) + canvas2d.height / 2 };
+}
+
+function pickValue(obj, keys) {
+    for (const key of keys) {
+        if (obj && obj[key] !== undefined && obj[key] !== null && obj[key] !== '') return obj[key];
+    }
+    return null;
+}
+
+function getPlayerInfo(p) {
+    const src = p?.userData || p || {};
+    const rawName = pickValue(src, ['alias', 'name', 'username', 'playerName', 'label']) || pickValue(p, ['alias', 'name']);
+    const rawHealth = pickValue(src, ['health', 'hp', 'maxHP', 'maxHealth']) ?? pickValue(p, ['health', 'hp']);
+    const rawMaxHealth = pickValue(src, ['maxHealth', 'maxHP', 'healthMax']) ?? pickValue(p, ['maxHealth', 'hpMax']);
+    const weapon = pickValue(src, ['weaponName', 'weapon', 'weaponLabel', 'gun']) || pickValue(p, ['weaponName', 'weapon']);
+
+    const health = Number.isFinite(Number(rawHealth)) ? Math.max(0, Math.round(Number(rawHealth))) : null;
+    const maxHealth = Number.isFinite(Number(rawMaxHealth)) ? Math.max(health || 0, Math.round(Number(rawMaxHealth))) : null;
+
+    return {
+        name: typeof rawName === 'string' ? rawName : 'Enemy',
+        health,
+        maxHealth,
+        weapon: typeof weapon === 'string' ? weapon : null,
+    };
+}
+
+function isDescendant(root, obj) {
+    let cur = obj;
+    while (cur) {
+        if (cur === root) return true;
+        cur = cur.parent;
+    }
+    return false;
+}
+
+function isPlayerVisible(me, target, cam) {
+    if (!settings.visCheck || !scene || !me || !target || !cam) return true;
+
+    rayOrigin.setFromMatrixPosition(cam.matrixWorld);
+    rayTarget.copy(bone(target, 'chest'));
+    rayDirection.copy(rayTarget).sub(rayOrigin);
+
+    const distance = rayDirection.length();
+    if (!distance) return true;
+
+    raycaster.near = 0;
+    raycaster.far = distance;
+    raycaster.set(rayOrigin, rayDirection.normalize());
+
+    const hits = raycaster.intersectObjects(scene.children, true);
+    for (const hit of hits) {
+        const obj = hit.object;
+        if (!obj || obj === line || obj === target.box) continue;
+        if (isDescendant(me, obj)) continue;
+        if (obj.material === chamsVisibleMaterial || obj.material === chamsHiddenMaterial) continue;
+        if (isDescendant(target, obj)) return true;
+        return false;
+    }
+
+    return true;
 }
 
 function bone(p, b) {
@@ -186,7 +262,9 @@ function draw2D(me, players, cam, target) {
     for (const p of players) {
         const isTgt = target && p === target;
         const dist = p.position.distanceTo(me.position);
-        const col = isTgt ? '#2ed573' : '#c83232';
+        const visible = p.isVisible !== false;
+        const info = getPlayerInfo(p);
+        const col = isTgt ? '#2ed573' : (visible ? '#c83232' : '#f1c40f');
 
         // Skeleton
         if (settings.espSkeleton) {
@@ -205,15 +283,23 @@ function draw2D(me, players, cam, target) {
         // Name
         if (settings.espNames) {
             ctx.font = 'bold 11px monospace'; ctx.textAlign = 'center';
-            ctx.fillStyle = '#000'; ctx.fillText('Enemy', hs.x + 1, hs.y - 12);
-            ctx.fillStyle = isTgt ? '#2ed573' : '#eee'; ctx.fillText('Enemy', hs.x, hs.y - 13);
+            ctx.fillStyle = '#000'; ctx.fillText(info.name, hs.x + 1, hs.y - 12);
+            ctx.fillStyle = isTgt ? '#2ed573' : (visible ? '#eee' : '#f7d774'); ctx.fillText(info.name, hs.x, hs.y - 13);
         }
 
-        // Distance
-        if (settings.espDistance) {
+        // Distance / health / weapon
+        const infoRows = [];
+        if (settings.espDistance) infoRows.push(`[${Math.floor(dist)}m]`);
+        if (settings.espHealth && info.health !== null) infoRows.push(info.maxHealth ? `HP ${info.health}/${info.maxHealth}` : `HP ${info.health}`);
+        if (settings.espWeapon && info.weapon) infoRows.push(String(info.weapon));
+
+        if (infoRows.length) {
             ctx.font = '10px monospace'; ctx.textAlign = 'center';
-            ctx.fillStyle = '#000'; ctx.fillText(`[${Math.floor(dist)}m]`, hs.x + 1, hs.y - 1);
-            ctx.fillStyle = '#888'; ctx.fillText(`[${Math.floor(dist)}m]`, hs.x, hs.y - 2);
+            infoRows.forEach((row, idx) => {
+                const y = hs.y - 2 + (idx * 11);
+                ctx.fillStyle = '#000'; ctx.fillText(row, hs.x + 1, y + 1);
+                ctx.fillStyle = visible ? '#888' : '#f7d774'; ctx.fillText(row, hs.x, y);
+            });
         }
 
         // Head dot
@@ -224,7 +310,7 @@ function draw2D(me, players, cam, target) {
     // Watermark
     ctx.font = 'bold 13px monospace'; ctx.textAlign = 'left';
     ctx.fillStyle = 'rgba(200,50,50,0.65)';
-    ctx.fillText('Netenyahu Armory HVH', 10, 20);
+    ctx.fillText(`Netenyahu Armory HVH ${settings.visCheck ? '[VIS]' : '[RAW]'}`, 10, 20);
 }
 
 // ═══════════════════════════════════════════
@@ -269,6 +355,7 @@ function animate() {
 
     if (!myPlayer) { Array.prototype.push = injectedPush; return; }
     if (!line.parent) myPlayer.add(line);
+    const cam = myPlayer?.children?.[0]?.children?.[0] || null;
 
     // Process enemies
     let counter = 0;
@@ -281,7 +368,7 @@ function animate() {
         const p = players[i];
 
         if (!p.box) {
-            const b = new THREE.LineSegments(geometry, material);
+            const b = new THREE.LineSegments(geometry, material.clone());
             b.frustumCulled = false;
             p.add(b);
             p.box = b;
@@ -292,6 +379,8 @@ function animate() {
             continue;
         }
 
+        p.isVisible = isPlayerVisible(myPlayer, p, cam);
+
         // Tracer line
         linePositions.setXYZ(counter++, 0, 10, -5);
         tempVector.copy(p.position); tempVector.y += 9;
@@ -300,9 +389,10 @@ function animate() {
 
         p.visible = settings.espEnabled || p.visible;
         p.box.visible = settings.espEnabled;
+        if (p.box.material?.color) p.box.material.color.set(p.isVisible ? 0xc83232 : 0xf1c40f);
 
         const d = p.position.distanceTo(myPlayer.position);
-        if (d < minDist) { targetPlayer = p; minDist = d; }
+        if ((!settings.visibleOnlyAimbot || p.isVisible) && d < minDist) { targetPlayer = p; minDist = d; }
     }
 
     linePositions.needsUpdate = true;
@@ -310,19 +400,19 @@ function animate() {
     line.visible = settings.espLines;
 
     // 2D overlay
-    const cam = myPlayer?.children?.[0]?.children?.[0] || null;
     draw2D(myPlayer, players, cam, targetPlayer);
 
     // Chams
-    if (settings.espChams) {
-        for (const p of players) {
-            p.traverse(c => {
-                if (c.isMesh && c.material) {
-                    if (!c._om) c._om = c.material;
-                    c.material = settings.espChams ? chamsMaterial : (c._om || c.material);
-                }
-            });
-        }
+    for (const p of players) {
+        p.traverse(c => {
+            if (!c.isMesh || !c.material) return;
+            if (!c._om) c._om = c.material;
+            if (settings.espChams) {
+                c.material = p.isVisible === false ? chamsHiddenMaterial : chamsVisibleMaterial;
+            } else if (c._om) {
+                c.material = c._om;
+            }
+        });
     }
 
     // Fog removal
@@ -388,8 +478,8 @@ function createGUI() {
     }
 
     const secs = {
-        'Aimbot': [['aimbotEnabled','Enable'], ['aimbotOnRightMouse','RMB Only']],
-        'ESP': [['espEnabled','Enable'], ['espLines','Tracers'], ['espSkeleton','Skeleton'], ['espNames','Names'], ['espDistance','Distance'], ['espChams','Chams']],
+        'Aimbot': [['aimbotEnabled','Enable'], ['aimbotOnRightMouse','RMB Only'], ['visibleOnlyAimbot','Visible Only']],
+        'ESP': [['espEnabled','Enable'], ['espLines','Tracers'], ['espSkeleton','Skeleton'], ['espNames','Names'], ['espDistance','Distance'], ['espHealth','Health'], ['espWeapon','Weapon'], ['espChams','Chams'], ['visCheck','Vis Check']],
         'Visuals': [['wireframe','Wireframe']],
     };
 
@@ -443,7 +533,7 @@ window.addEventListener('DOMContentLoaded', () => {
     document.body.appendChild(el);
     bindInput(showMsg);
     animate();
-    x.consoleLog('[Armory] Ready — B:aim V:esp N:lines J:skel C:chams H:hide K:wire L:rmb');
+    x.consoleLog('[Armory] Ready — B:aim V:esp N:lines J:skel U:vis I:visible O:hp P:weapon C:chams H:hide K:wire L:rmb');
 });
 
 })();
