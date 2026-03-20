@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Netenyahu Armory — Krunker HVH
 // @namespace    http://tampermonkey.net/
-// @version      1.0.0
+// @version      1.1.0
 // @description  Aimbot, ESP, Tracers, Skeleton, Chams for Krunker.io. Instant lock, no smoothing, pure HVH.
 // @match        *://krunker.io/*
 // @match        *://browserfps.com/*
@@ -25,22 +25,28 @@ delete window.THREE;
 const settings = {
     aimbotEnabled: true,
     aimbotOnRightMouse: false,
+    aimVisibleOnly: true,
     espEnabled: true,
     espLines: true,
     espSkeleton: true,
     espNames: true,
     espDistance: true,
     espChams: true,
+    visCheck: true,
+    gameInfo: true,
     wireframe: false,
 };
 
 const keyToSetting = {
     KeyB: 'aimbotEnabled',
     KeyL: 'aimbotOnRightMouse',
+    KeyP: 'aimVisibleOnly',
     KeyV: 'espEnabled',
     KeyN: 'espLines',
     KeyJ: 'espSkeleton',
     KeyC: 'espChams',
+    KeyO: 'visCheck',
+    KeyI: 'gameInfo',
     KeyK: 'wireframe',
 };
 
@@ -90,6 +96,8 @@ const injectedPush = function() {
 // 3D OBJECTS (ESP boxes, tracers, chams)
 // ═══════════════════════════════════════════
 const tempVector = new THREE.Vector3();
+const tempVector2 = new THREE.Vector3();
+const tempVector3 = new THREE.Vector3();
 const tempObject = new THREE.Object3D();
 tempObject.rotation.order = 'YXZ';
 
@@ -97,25 +105,42 @@ const geometry = new THREE.EdgesGeometry(
     new THREE.BoxGeometry(5, 15, 5).translate(0, 7.5, 0)
 );
 
+const tracerVisibleColor = new THREE.Color(0x2ed573);
+const tracerHiddenColor = new THREE.Color(0xc83232);
+
 // RawShader: renders through walls via gl_Position.z = 1.0
 const material = new THREE.RawShaderMaterial({
     vertexShader: `
         attribute vec3 position;
+        attribute vec3 color;
+        varying vec3 vColor;
         uniform mat4 projectionMatrix;
         uniform mat4 modelViewMatrix;
         void main() {
+            vColor = color;
             gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
             gl_Position.z = 1.0;
         }
     `,
     fragmentShader: `
+        precision mediump float;
+        varying vec3 vColor;
         void main() {
-            gl_FragColor = vec4(0.78, 0.2, 0.2, 1.0);
+            gl_FragColor = vec4(vColor, 1.0);
         }
     `
 });
 
-const chamsMaterial = new THREE.MeshBasicMaterial({
+const chamsVisibleMaterial = new THREE.MeshBasicMaterial({
+    color: 0x2ed573,
+    wireframe: false,
+    transparent: true,
+    opacity: 0.2,
+    depthTest: false,
+    toneMapped: false,
+});
+
+const chamsHiddenMaterial = new THREE.MeshBasicMaterial({
     color: 0xc83232,
     wireframe: false,
     transparent: true,
@@ -127,7 +152,9 @@ const chamsMaterial = new THREE.MeshBasicMaterial({
 const line = new THREE.LineSegments(new THREE.BufferGeometry(), material);
 line.frustumCulled = false;
 const linePositions = new THREE.BufferAttribute(new Float32Array(100 * 2 * 3), 3);
+const lineColors = new THREE.BufferAttribute(new Float32Array(100 * 2 * 3), 3);
 line.geometry.setAttribute('position', linePositions);
+line.geometry.setAttribute('color', lineColors);
 
 // ═══════════════════════════════════════════
 // OVERLAY CANVAS (2D drawing)
@@ -150,6 +177,13 @@ function createOverlay() {
 // HELPERS
 // ═══════════════════════════════════════════
 const _pv = new THREE.Vector3();
+const eyeOffset = new THREE.Vector3(0, 8.5, 0);
+const raycaster = new THREE.Raycaster();
+const rayHits = [];
+const visibilityState = {
+    mapMeshes: [],
+    lastSceneVersion: -1,
+};
 
 function w2s(pos, cam) {
     if (!cam || !canvas2d) return null;
@@ -167,6 +201,79 @@ function bone(p, b) {
     return new THREE.Vector3(o.x + d[0], o.y + d[1], o.z + d[2]);
 }
 
+function getPlayerHead(player) {
+    tempVector2.setScalar(0);
+    if (player?.children?.[0]?.children?.[0]?.localToWorld) {
+        return player.children[0].children[0].localToWorld(tempVector2.clone());
+    }
+    return bone(player, 'head');
+}
+
+function isChildOf(root, child) {
+    let cur = child;
+    while (cur) {
+        if (cur === root) return true;
+        cur = cur.parent;
+    }
+    return false;
+}
+
+function rebuildMapMeshes(root, players, myPlayer) {
+    const blockedParents = new Set([myPlayer, line, ...players]);
+    const meshes = [];
+
+    root.traverse(obj => {
+        if (!obj?.isMesh || !obj.geometry || !obj.visible) return;
+        if (obj.material?.transparent && obj.material.opacity <= 0.15) return;
+        for (const blocked of blockedParents) {
+            if (blocked && isChildOf(blocked, obj)) return;
+        }
+        meshes.push(obj);
+    });
+
+    visibilityState.mapMeshes = meshes;
+    visibilityState.lastSceneVersion = root.children.length;
+}
+
+function isVisible(myPlayer, targetPlayer, camera, players) {
+    if (!settings.visCheck || !camera) return true;
+
+    if (visibilityState.lastSceneVersion !== scene.children.length || visibilityState.mapMeshes.length === 0) {
+        rebuildMapMeshes(scene, players, myPlayer);
+    }
+
+    const origin = camera.getWorldPosition(tempVector2);
+    const destination = getPlayerHead(targetPlayer);
+    const direction = tempVector3.copy(destination).sub(origin);
+    const distance = direction.length();
+    if (!distance) return true;
+
+    direction.normalize();
+    raycaster.set(origin, direction);
+    raycaster.far = distance - 0.35;
+    rayHits.length = 0;
+    raycaster.intersectObjects(visibilityState.mapMeshes, true, rayHits);
+    return rayHits.length === 0;
+}
+
+function parseMatchInfo() {
+    const matchCode = new URL(location.href).searchParams.get('game') || 'menu';
+    const regionGuess = matchCode.includes(':') ? matchCode.split(':')[0] : (localStorage.pingRegion7 || 'unknown');
+    const overlayCanvas = document.querySelector('#game-overlay');
+    const miniMapCanvas = document.querySelector('#miniMapCanvas');
+
+    return {
+        matchCode,
+        region: regionGuess,
+        overlay: overlayCanvas ? `${overlayCanvas.width}x${overlayCanvas.height}` : 'n/a',
+        minimap: miniMapCanvas ? `${miniMapCanvas.width}x${miniMapCanvas.height}` : 'n/a',
+    };
+}
+
+function getPlayerLabel(player, index) {
+    return player?.name || player?.alias || player?.label || `Enemy ${index + 1}`;
+}
+
 const skel = [
     ['head','neck'],['neck','chest'],['chest','pelvis'],
     ['neck','lshoulder'],['lshoulder','lhand'],
@@ -176,55 +283,82 @@ const skel = [
 ];
 
 // ═══════════════════════════════════════════
-// 2D ESP (skeleton, names, distance, head dots)
+// 2D ESP (skeleton, names, distance, game info)
 // ═══════════════════════════════════════════
-function draw2D(me, players, cam, target) {
+function draw2D(me, players, cam, target, info) {
     if (!ctx || !canvas2d) return;
     ctx.clearRect(0, 0, canvas2d.width, canvas2d.height);
     if (!settings.espEnabled || !cam) return;
 
-    for (const p of players) {
+    for (let index = 0; index < players.length; index++) {
+        const p = players[index];
         const isTgt = target && p === target;
         const dist = p.position.distanceTo(me.position);
-        const col = isTgt ? '#2ed573' : '#c83232';
+        const visible = p.__armoryVisible !== false;
+        const col = isTgt ? '#2ed573' : (visible ? '#ffd166' : '#c83232');
 
-        // Skeleton
         if (settings.espSkeleton) {
             for (const [a, b] of skel) {
                 const sa = w2s(bone(p, a), cam);
                 const sb = w2s(bone(p, b), cam);
                 if (!sa || !sb) continue;
-                ctx.beginPath(); ctx.moveTo(sa.x, sa.y); ctx.lineTo(sb.x, sb.y);
-                ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(sa.x, sa.y);
+                ctx.lineTo(sb.x, sb.y);
+                ctx.strokeStyle = col;
+                ctx.lineWidth = visible ? 1.5 : 1;
+                ctx.stroke();
             }
         }
 
         const hs = w2s(bone(p, 'head'), cam);
         if (!hs) continue;
 
-        // Name
         if (settings.espNames) {
-            ctx.font = 'bold 11px monospace'; ctx.textAlign = 'center';
-            ctx.fillStyle = '#000'; ctx.fillText('Enemy', hs.x + 1, hs.y - 12);
-            ctx.fillStyle = isTgt ? '#2ed573' : '#eee'; ctx.fillText('Enemy', hs.x, hs.y - 13);
+            const label = `${getPlayerLabel(p, index)}${visible ? '' : ' [HIDDEN]'}`;
+            ctx.font = 'bold 11px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillStyle = '#000';
+            ctx.fillText(label, hs.x + 1, hs.y - 12);
+            ctx.fillStyle = isTgt ? '#2ed573' : '#eee';
+            ctx.fillText(label, hs.x, hs.y - 13);
         }
 
-        // Distance
         if (settings.espDistance) {
-            ctx.font = '10px monospace'; ctx.textAlign = 'center';
-            ctx.fillStyle = '#000'; ctx.fillText(`[${Math.floor(dist)}m]`, hs.x + 1, hs.y - 1);
-            ctx.fillStyle = '#888'; ctx.fillText(`[${Math.floor(dist)}m]`, hs.x, hs.y - 2);
+            const visTag = visible ? 'VIS' : 'X';
+            ctx.font = '10px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillStyle = '#000';
+            ctx.fillText(`[${Math.floor(dist)}m|${visTag}]`, hs.x + 1, hs.y - 1);
+            ctx.fillStyle = visible ? '#ffd166' : '#888';
+            ctx.fillText(`[${Math.floor(dist)}m|${visTag}]`, hs.x, hs.y - 2);
         }
 
-        // Head dot
-        ctx.beginPath(); ctx.arc(hs.x, hs.y, 3, 0, Math.PI * 2);
-        ctx.fillStyle = col; ctx.fill();
+        ctx.beginPath();
+        ctx.arc(hs.x, hs.y, 3, 0, Math.PI * 2);
+        ctx.fillStyle = col;
+        ctx.fill();
     }
 
-    // Watermark
-    ctx.font = 'bold 13px monospace'; ctx.textAlign = 'left';
+    ctx.font = 'bold 13px monospace';
+    ctx.textAlign = 'left';
     ctx.fillStyle = 'rgba(200,50,50,0.65)';
     ctx.fillText('Netenyahu Armory HVH', 10, 20);
+
+    if (settings.gameInfo && info) {
+        const rows = [
+            `match: ${info.match.matchCode}`,
+            `region: ${info.match.region}`,
+            `players: ${info.totalPlayers} | visible: ${info.visiblePlayers}`,
+            `target: ${info.targetName} | ${info.targetDistance}`,
+            `target vis: ${info.targetVisible ? 'clear' : 'blocked'}`,
+            `overlay: ${info.match.overlay} | minimap: ${info.match.minimap}`,
+        ];
+
+        ctx.font = '11px monospace';
+        ctx.fillStyle = 'rgba(255,255,255,0.85)';
+        rows.forEach((row, idx) => ctx.fillText(row, 10, 40 + idx * 15));
+    }
 }
 
 // ═══════════════════════════════════════════
@@ -249,7 +383,6 @@ function animate() {
 
     if (!scene || !scene.children) return;
 
-    // Find self + enemies
     const players = [];
     let myPlayer;
 
@@ -267,21 +400,27 @@ function animate() {
         } catch (e) {}
     }
 
-    if (!myPlayer) { Array.prototype.push = injectedPush; return; }
+    if (!myPlayer) {
+        Array.prototype.push = injectedPush;
+        return;
+    }
     if (!line.parent) myPlayer.add(line);
 
-    // Process enemies
     let counter = 0;
-    let targetPlayer;
+    let targetPlayer = null;
+    let visibleTargetPlayer = null;
     let minDist = Infinity;
+    let minVisibleDist = Infinity;
+    let visiblePlayers = 0;
 
     tempObject.matrix.copy(myPlayer.matrix).invert();
+    const cam = myPlayer?.children?.[0]?.children?.[0] || null;
 
     for (let i = 0; i < players.length; i++) {
         const p = players[i];
 
         if (!p.box) {
-            const b = new THREE.LineSegments(geometry, material);
+            const b = new THREE.LineSegments(geometry, material.clone());
             b.frustumCulled = false;
             p.add(b);
             p.box = b;
@@ -289,57 +428,86 @@ function animate() {
 
         if (p.position.y < -100 || (p.position.x === myPlayer.position.x && p.position.z === myPlayer.position.z)) {
             p.box.visible = false;
+            p.__armoryVisible = false;
             continue;
         }
 
-        // Tracer line
-        linePositions.setXYZ(counter++, 0, 10, -5);
-        tempVector.copy(p.position); tempVector.y += 9;
+        const visible = isVisible(myPlayer, p, cam, players);
+        p.__armoryVisible = visible;
+        if (visible) visiblePlayers++;
+
+        linePositions.setXYZ(counter, 0, 10, -5);
+        tracerVisibleColor.toArray(lineColors.array, counter * 3);
+        counter++;
+
+        tempVector.copy(p.position);
+        tempVector.y += 9;
         tempVector.applyMatrix4(tempObject.matrix);
-        linePositions.setXYZ(counter++, tempVector.x, tempVector.y, tempVector.z);
+        linePositions.setXYZ(counter, tempVector.x, tempVector.y, tempVector.z);
+        (visible ? tracerVisibleColor : tracerHiddenColor).toArray(lineColors.array, counter * 3);
+        counter++;
 
         p.visible = settings.espEnabled || p.visible;
         p.box.visible = settings.espEnabled;
+        p.box.material = visible ? material : material;
 
         const d = p.position.distanceTo(myPlayer.position);
-        if (d < minDist) { targetPlayer = p; minDist = d; }
+        if (d < minDist) {
+            targetPlayer = p;
+            minDist = d;
+        }
+        if (visible && d < minVisibleDist) {
+            visibleTargetPlayer = p;
+            minVisibleDist = d;
+        }
+    }
+
+    if (settings.aimVisibleOnly && visibleTargetPlayer) {
+        targetPlayer = visibleTargetPlayer;
+        minDist = minVisibleDist;
     }
 
     linePositions.needsUpdate = true;
+    lineColors.needsUpdate = true;
     line.geometry.setDrawRange(0, counter);
-    line.visible = settings.espLines;
+    line.visible = settings.espEnabled && settings.espLines;
 
-    // 2D overlay
-    const cam = myPlayer?.children?.[0]?.children?.[0] || null;
-    draw2D(myPlayer, players, cam, targetPlayer);
+    const info = {
+        match: parseMatchInfo(),
+        totalPlayers: players.length,
+        visiblePlayers,
+        targetName: targetPlayer ? getPlayerLabel(targetPlayer, players.indexOf(targetPlayer)) : 'none',
+        targetDistance: targetPlayer ? `${Math.floor(minDist)}m` : 'n/a',
+        targetVisible: !!targetPlayer?.__armoryVisible,
+    };
 
-    // Chams
+    draw2D(myPlayer, players, cam, targetPlayer, info);
+
     if (settings.espChams) {
         for (const p of players) {
+            const vis = p.__armoryVisible !== false;
             p.traverse(c => {
                 if (c.isMesh && c.material) {
                     if (!c._om) c._om = c.material;
-                    c.material = settings.espChams ? chamsMaterial : (c._om || c.material);
+                    c.material = settings.espChams ? (vis ? chamsVisibleMaterial : chamsHiddenMaterial) : (c._om || c.material);
                 }
+            });
+        }
+    } else {
+        for (const p of players) {
+            p.traverse(c => {
+                if (c.isMesh && c._om) c.material = c._om;
             });
         }
     }
 
-    // Fog removal
     if (settings.wireframe && scene.fog) scene.fog = null;
 
-    // ── AIMBOT: instant lock ──
     if (!settings.aimbotEnabled || (settings.aimbotOnRightMouse && !rightMouseDown) || !targetPlayer) return;
+    if (settings.aimVisibleOnly && targetPlayer.__armoryVisible === false) return;
 
-    tempVector.setScalar(0);
-    if (targetPlayer?.children?.[0]?.children?.[0]?.localToWorld) {
-        targetPlayer.children[0].children[0].localToWorld(tempVector);
-    } else {
-        tempVector.copy(targetPlayer.position);
-        tempVector.y += 9;
-    }
-
-    tempObject.position.copy(myPlayer.position);
+    tempVector.copy(getPlayerHead(targetPlayer));
+    tempObject.position.copy(myPlayer.position).add(eyeOffset);
     tempObject.lookAt(tempVector);
 
     myPlayer.children[0].rotation.x = -tempObject.rotation.x;
@@ -388,29 +556,43 @@ function createGUI() {
     }
 
     const secs = {
-        'Aimbot': [['aimbotEnabled','Enable'], ['aimbotOnRightMouse','RMB Only']],
-        'ESP': [['espEnabled','Enable'], ['espLines','Tracers'], ['espSkeleton','Skeleton'], ['espNames','Names'], ['espDistance','Distance'], ['espChams','Chams']],
+        'Aimbot': [['aimbotEnabled','Enable'], ['aimbotOnRightMouse','RMB Only'], ['aimVisibleOnly','Visible Only']],
+        'ESP': [['espEnabled','Enable'], ['espLines','Tracers'], ['espSkeleton','Skeleton'], ['espNames','Names'], ['espDistance','Distance'], ['espChams','Chams'], ['visCheck','Vis Check']],
+        'Info': [['gameInfo','Game Info']],
         'Visuals': [['wireframe','Wireframe']],
     };
 
     for (const [sec, items] of Object.entries(secs)) {
-        const s = document.createElement('div'); s.className = 'as'; s.textContent = sec;
+        const s = document.createElement('div');
+        s.className = 'as';
+        s.textContent = sec;
         body.appendChild(s);
         for (const [key, label] of items) {
-            const row = document.createElement('div'); row.className = 'ai';
-            const nm = document.createElement('span'); nm.textContent = label;
+            const row = document.createElement('div');
+            row.className = 'ai';
+            const nm = document.createElement('span');
+            nm.textContent = label;
             const vl = document.createElement('span');
-            const upd = () => { vl.textContent = settings[key] ? 'ON' : 'OFF'; vl.className = settings[key] ? 'aon' : 'aoff'; };
+            const upd = () => {
+                vl.textContent = settings[key] ? 'ON' : 'OFF';
+                vl.className = settings[key] ? 'aon' : 'aoff';
+            };
             upd();
-            row.onclick = () => { settings[key] = !settings[key]; upd(); showMsg(label, settings[key]); };
-            row.appendChild(nm); row.appendChild(vl);
+            row.onclick = () => {
+                settings[key] = !settings[key];
+                upd();
+                showMsg(label, settings[key]);
+            };
+            row.appendChild(nm);
+            row.appendChild(vl);
             body.appendChild(row);
         }
     }
 
-    const cr = document.createElement('div'); cr.className = 'ai';
+    const cr = document.createElement('div');
+    cr.className = 'ai';
     cr.style.cssText = 'justify-content:center;color:#444;font-size:9px;cursor:default';
-    cr.textContent = 'Netenyahu Armory HVH v1.0';
+    cr.textContent = 'Netenyahu Armory HVH v1.1';
     body.appendChild(cr);
 
     return { el, showMsg };
@@ -425,7 +607,10 @@ function bindInput(showMsg) {
     window.addEventListener('keyup', e => {
         if (document.activeElement?.value !== undefined) return;
         const s = keyToSetting[e.code];
-        if (s) { settings[s] = !settings[s]; showMsg(s, settings[s]); }
+        if (s) {
+            settings[s] = !settings[s];
+            showMsg(s, settings[s]);
+        }
         if (e.code === 'KeyH') {
             const g = document.querySelector('.ag');
             if (g) g.style.display = g.style.display === 'none' ? '' : 'none';
@@ -443,7 +628,7 @@ window.addEventListener('DOMContentLoaded', () => {
     document.body.appendChild(el);
     bindInput(showMsg);
     animate();
-    x.consoleLog('[Armory] Ready — B:aim V:esp N:lines J:skel C:chams H:hide K:wire L:rmb');
+    x.consoleLog('[Armory] Ready — B:aim P:vis-aim V:esp N:lines J:skel C:chams O:vis-check I:info H:hide K:wire L:rmb');
 });
 
 })();
