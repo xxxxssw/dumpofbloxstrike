@@ -1,642 +1,449 @@
 // ==UserScript==
-// @name         Krunker.IO Aimbot & ESP
+// @name         Netenyahu Armory — Krunker HVH
 // @namespace    http://tampermonkey.net/
-// @version      0.3.3
-// @description  Locks aim to the nearest player in krunker.io and shows players behind walls. Also shows a line between you and them.
-// @author       Zertalious (Zert)
+// @version      1.0.0
+// @description  Aimbot, ESP, Tracers, Skeleton, Chams for Krunker.io. Instant lock, no smoothing, pure HVH.
 // @match        *://krunker.io/*
 // @match        *://browserfps.com/*
 // @exclude      *://krunker.io/social*
 // @exclude      *://krunker.io/editor*
-// @icon         https://www.google.com/s2/favicons?domain=krunker.io
 // @grant        none
 // @run-at       document-start
 // @require      https://unpkg.com/three@0.150.0/build/three.min.js
-// @downloadURL https://update.greasyfork.org/scripts/432453/KrunkerIO%20Aimbot%20%20ESP.user.js
-// @updateURL https://update.greasyfork.org/scripts/432453/KrunkerIO%20Aimbot%20%20ESP.meta.js
 // ==/UserScript==
 
+(() => {
+'use strict';
+
+// Grab THREE before Krunker deletes it
 const THREE = window.THREE;
 delete window.THREE;
 
+// ═══════════════════════════════════════════
+// SETTINGS
+// ═══════════════════════════════════════════
 const settings = {
-	aimbotEnabled: true, 
-	aimbotOnRightMouse: false,
-	espEnabled: true, 
-	espLines: true, 
-	wireframe: false
+    aimbotEnabled: true,
+    aimbotOnRightMouse: false,
+    espEnabled: true,
+    espLines: true,
+    espSkeleton: true,
+    espNames: true,
+    espDistance: true,
+    espChams: true,
+    wireframe: false,
 };
 
 const keyToSetting = {
-	KeyB: 'aimbotEnabled',
-	KeyL: 'aimbotOnRightMouse',  
-	KeyM: 'espEnabled', 
-	KeyN: 'espLines', 
-	KeyK: 'wireframe'
+    KeyB: 'aimbotEnabled',
+    KeyL: 'aimbotOnRightMouse',
+    KeyV: 'espEnabled',
+    KeyN: 'espLines',
+    KeyJ: 'espSkeleton',
+    KeyC: 'espChams',
+    KeyK: 'wireframe',
 };
 
-const gui = createGUI();
-
-let scene;
-
+// ═══════════════════════════════════════════
+// NATIVE CACHE (anti-tamper)
+// ═══════════════════════════════════════════
 const x = {
-	window: window,
-	document: document,
-	querySelector: document.querySelector,
-	consoleLog: console.log,
-	ReflectApply: Reflect.apply,
-	ArrayPrototype: Array.prototype,
-	ArrayPush: Array.prototype.push,
-	ObjectPrototype: Object.prototype,
-	clearInterval: window.clearInterval,
-	setTimeout: window.setTimeout,
-	reToString: RegExp.prototype.toString,
-	indexOf: String.prototype.indexOf, 
-	requestAnimationFrame: window.requestAnimationFrame
+    consoleLog: console.log.bind(console),
+    requestAnimationFrame: window.requestAnimationFrame.bind(window),
+    setTimeout: window.setTimeout.bind(window),
+    indexOf: String.prototype.indexOf,
+    reToString: RegExp.prototype.toString,
 };
 
-x.consoleLog( 'Waiting to inject...' );
+x.consoleLog('[Armory] Waiting to inject...');
 
-const proxied = function ( object ) {
+// Protect toString from detection
+const _call = Function.prototype.call;
+Function.prototype.call = function() {
+    if (this === x.reToString && x.indexOf.call(arguments[0]?.source || '', 'toString') >= 0) {
+        return '/^function [a-zA-Z]+\\(\\) { \\[native code\\] }$/';
+    }
+    return _call.apply(this, arguments);
+};
 
-	// [native code]
+// ═══════════════════════════════════════════
+// SCENE INJECTION (Array.push proxy)
+// ═══════════════════════════════════════════
+let scene = null;
+const _push = Array.prototype.push;
 
-	try {
+const injectedPush = function() {
+    for (let i = 0; i < arguments.length; i++) {
+        const obj = arguments[i];
+        if (typeof obj === 'object' && obj !== null &&
+            typeof obj.parent === 'object' && obj.parent !== null &&
+            obj.parent.type === 'Scene') {
+            x.consoleLog('[Armory] Scene captured!');
+            scene = obj.parent;
+            Array.prototype.push = _push;
+        }
+    }
+    return _push.apply(this, arguments);
+};
 
-		if ( typeof object === 'object' &&
-			typeof object.parent === 'object' &&
-			object.parent.type === 'Scene' &&
-			object.parent.name === 'Main' ) {
-
-			x.consoleLog( 'Found Scene!' )
-			scene = object.parent;
-			x.ArrayPrototype.push = x.ArrayPush;
-
-		}
-
-	} catch ( error ) {}
-
-	return x.ArrayPush.apply( this, arguments );
-
-}
-
+// ═══════════════════════════════════════════
+// 3D OBJECTS (ESP boxes, tracers, chams)
+// ═══════════════════════════════════════════
 const tempVector = new THREE.Vector3();
-
 const tempObject = new THREE.Object3D();
 tempObject.rotation.order = 'YXZ';
 
-const geometry = new THREE.EdgesGeometry( new THREE.BoxGeometry( 5, 15, 5 ).translate( 0, 7.5, 0 ) );
+const geometry = new THREE.EdgesGeometry(
+    new THREE.BoxGeometry(5, 15, 5).translate(0, 7.5, 0)
+);
 
-const material = new THREE.RawShaderMaterial( {
-	vertexShader: `
+// RawShader: renders through walls via gl_Position.z = 1.0
+const material = new THREE.RawShaderMaterial({
+    vertexShader: `
+        attribute vec3 position;
+        uniform mat4 projectionMatrix;
+        uniform mat4 modelViewMatrix;
+        void main() {
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            gl_Position.z = 1.0;
+        }
+    `,
+    fragmentShader: `
+        void main() {
+            gl_FragColor = vec4(0.78, 0.2, 0.2, 1.0);
+        }
+    `
+});
 
-	attribute vec3 position;
+const chamsMaterial = new THREE.MeshBasicMaterial({
+    color: 0xc83232,
+    wireframe: false,
+    transparent: true,
+    opacity: 0.35,
+    depthTest: false,
+    toneMapped: false,
+});
 
-	uniform mat4 projectionMatrix;
-	uniform mat4 modelViewMatrix;
-
-	void main() {
-
-		gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
-		gl_Position.z = 1.0;
-
-	}
-
-	`,
-	fragmentShader: `
-
-	void main() {
-
-		gl_FragColor = vec4( 1.0, 0.0, 0.0, 1.0 );
-
-	}
-
-	`
-} );
-
-const line = new THREE.LineSegments( new THREE.BufferGeometry(), material );
-
+const line = new THREE.LineSegments(new THREE.BufferGeometry(), material);
 line.frustumCulled = false;
+const linePositions = new THREE.BufferAttribute(new Float32Array(100 * 2 * 3), 3);
+line.geometry.setAttribute('position', linePositions);
 
-const linePositions = new THREE.BufferAttribute( new Float32Array( 100 * 2 * 3 ), 3 );
-line.geometry.setAttribute( 'position', linePositions );
+// ═══════════════════════════════════════════
+// OVERLAY CANVAS (2D drawing)
+// ═══════════════════════════════════════════
+let canvas2d = null;
+let ctx = null;
 
+function createOverlay() {
+    canvas2d = document.createElement('canvas');
+    canvas2d.id = 'armory-overlay';
+    canvas2d.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:99999;';
+    document.body.appendChild(canvas2d);
+    ctx = canvas2d.getContext('2d');
+    const resize = () => { canvas2d.width = window.innerWidth; canvas2d.height = window.innerHeight; };
+    resize();
+    window.addEventListener('resize', resize);
+}
+
+// ═══════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════
+const _pv = new THREE.Vector3();
+
+function w2s(pos, cam) {
+    if (!cam || !canvas2d) return null;
+    _pv.copy(pos).project(cam);
+    if (_pv.z > 1) return null;
+    return { x: (_pv.x * canvas2d.width / 2) + canvas2d.width / 2, y: -(_pv.y * canvas2d.height / 2) + canvas2d.height / 2 };
+}
+
+function bone(p, b) {
+    const o = p.position;
+    const m = { head:[0,11,0], neck:[0,10,0], chest:[0,8,0], pelvis:[0,5,0],
+        lshoulder:[-2.5,10,0], rshoulder:[2.5,10,0], lhand:[-3,8,0], rhand:[3,8,0],
+        lknee:[-1.5,3,0], rknee:[1.5,3,0], lfoot:[-1.5,0,0], rfoot:[1.5,0,0] };
+    const d = m[b] || [0,9,0];
+    return new THREE.Vector3(o.x + d[0], o.y + d[1], o.z + d[2]);
+}
+
+const skel = [
+    ['head','neck'],['neck','chest'],['chest','pelvis'],
+    ['neck','lshoulder'],['lshoulder','lhand'],
+    ['neck','rshoulder'],['rshoulder','rhand'],
+    ['pelvis','lknee'],['lknee','lfoot'],
+    ['pelvis','rknee'],['rknee','rfoot'],
+];
+
+// ═══════════════════════════════════════════
+// 2D ESP (skeleton, names, distance, head dots)
+// ═══════════════════════════════════════════
+function draw2D(me, players, cam, target) {
+    if (!ctx || !canvas2d) return;
+    ctx.clearRect(0, 0, canvas2d.width, canvas2d.height);
+    if (!settings.espEnabled || !cam) return;
+
+    for (const p of players) {
+        const isTgt = target && p === target;
+        const dist = p.position.distanceTo(me.position);
+        const col = isTgt ? '#2ed573' : '#c83232';
+
+        // Skeleton
+        if (settings.espSkeleton) {
+            for (const [a, b] of skel) {
+                const sa = w2s(bone(p, a), cam);
+                const sb = w2s(bone(p, b), cam);
+                if (!sa || !sb) continue;
+                ctx.beginPath(); ctx.moveTo(sa.x, sa.y); ctx.lineTo(sb.x, sb.y);
+                ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.stroke();
+            }
+        }
+
+        const hs = w2s(bone(p, 'head'), cam);
+        if (!hs) continue;
+
+        // Name
+        if (settings.espNames) {
+            ctx.font = 'bold 11px monospace'; ctx.textAlign = 'center';
+            ctx.fillStyle = '#000'; ctx.fillText('Enemy', hs.x + 1, hs.y - 12);
+            ctx.fillStyle = isTgt ? '#2ed573' : '#eee'; ctx.fillText('Enemy', hs.x, hs.y - 13);
+        }
+
+        // Distance
+        if (settings.espDistance) {
+            ctx.font = '10px monospace'; ctx.textAlign = 'center';
+            ctx.fillStyle = '#000'; ctx.fillText(`[${Math.floor(dist)}m]`, hs.x + 1, hs.y - 1);
+            ctx.fillStyle = '#888'; ctx.fillText(`[${Math.floor(dist)}m]`, hs.x, hs.y - 2);
+        }
+
+        // Head dot
+        ctx.beginPath(); ctx.arc(hs.x, hs.y, 3, 0, Math.PI * 2);
+        ctx.fillStyle = col; ctx.fill();
+    }
+
+    // Watermark
+    ctx.font = 'bold 13px monospace'; ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(200,50,50,0.65)';
+    ctx.fillText('Netenyahu Armory HVH', 10, 20);
+}
+
+// ═══════════════════════════════════════════
+// MAIN LOOP
+// ═══════════════════════════════════════════
+let rightMouseDown = false;
 let injectTimer = null;
 
 function animate() {
-
-	x.requestAnimationFrame.call( x.window, animate );
-
-	if ( ! scene && ! injectTimer ) {
-
-		const el = x.querySelector.call( x.document, '#loadingBg' );
-
-		if ( el && el.style.display === 'none' ) {
-
-			x.consoleLog( 'Inject timer started!' );
-
-			injectTimer = x.setTimeout.call( x.window, () => {
-
-				x.consoleLog( 'Injected!' );
-				x.ArrayPrototype.push = proxied;
-
-			}, 2e3 );
-
-		}
-
-	}
-
-	if ( scene === undefined || ! scene.children ) {
-
-		return;
-
-	}
-
-	const players = [];
-
-	let myPlayer;
-
-	for ( let i = 0; i < scene.children.length; i ++ ) {
-
-		const child = scene.children[ i ];
-
-		if ( child.type === 'Object3D' ) {
-
-			try {
-
-				if ( child.children[ 0 ].children[ 0 ].type === 'PerspectiveCamera' ) {
-
-					myPlayer = child;
-
-				} else {
-
-					players.push( child );
-
-				}
-
-			} catch ( err ) {}
-
-		} else if ( child.material ) {
-
-			child.material.wireframe = settings.wireframe;
-
-		}
-
-	}
-
-	if ( ! myPlayer ) {
-
-		x.consoleLog( 'Player not found, finding new scene.' );
-		x.ArrayPrototype.push = proxied;
-		return;
-
-	}
-
-	let counter = 0;
-
-	let targetPlayer;
-	let minDistance = Infinity;
-
-	tempObject.matrix.copy( myPlayer.matrix ).invert()
-
-	for ( let i = 0; i < players.length; i ++ ) {
-
-		const player = players[ i ];
-
-		if ( ! player.box ) {
-
-			const box = new THREE.LineSegments( geometry, material );
-			box.frustumCulled = false;
-
-			player.add( box );
-
-			player.box = box;
-
-		}
-
-		if ( player.position.x === myPlayer.position.x && player.position.z === myPlayer.position.z ) {
-
-			player.box.visible = false;
-
-			if ( line.parent !== player ) {
-
-				player.add( line );
-
-			}
-
-			continue;
-
-		}
-
-		linePositions.setXYZ( counter ++, 0, 10, - 5 );
-
-		tempVector.copy( player.position );
-		tempVector.y += 9;
-		tempVector.applyMatrix4( tempObject.matrix );
-
-		linePositions.setXYZ(
-			counter ++,
-			tempVector.x,
-			tempVector.y,
-			tempVector.z
-		);
-
-		player.visible = settings.espEnabled || player.visible;
-		player.box.visible = settings.espEnabled;
-
-		const distance = player.position.distanceTo( myPlayer.position );
-
-		if ( distance < minDistance ) {
-
-			targetPlayer = player;
-			minDistance = distance;
-
-		}
-
-	}
-
-	linePositions.needsUpdate = true;
-	line.geometry.setDrawRange( 0, counter );
-
-	line.visible = settings.espLines;
-
-	if ( settings.aimbotEnabled === false || ( settings.aimbotOnRightMouse && ! rightMouseDown ) || targetPlayer === undefined ) {
-
-		return;
-
-	}
-
-	tempVector.setScalar( 0 );
-
-	targetPlayer.children[ 0 ].children[ 0 ].localToWorld( tempVector );
-
-	tempObject.position.copy( myPlayer.position );
-
-	tempObject.lookAt( tempVector );
-
-	myPlayer.children[ 0 ].rotation.x = - tempObject.rotation.x;
-	myPlayer.rotation.y = tempObject.rotation.y + Math.PI;
-
+    x.requestAnimationFrame(animate);
+
+    if (!scene && !injectTimer) {
+        const el = document.querySelector('#loadingBg');
+        if (el && el.style.display === 'none') {
+            x.consoleLog('[Armory] Inject timer started');
+            injectTimer = x.setTimeout(() => {
+                x.consoleLog('[Armory] Injecting...');
+                Array.prototype.push = injectedPush;
+            }, 2000);
+        }
+    }
+
+    if (!scene || !scene.children) return;
+
+    // Find self + enemies
+    const players = [];
+    let myPlayer;
+
+    for (let i = 0; i < scene.children.length; i++) {
+        const c = scene.children[i];
+        if (c.type !== 'Object3D') continue;
+        try {
+            if (c.children.length > 0) {
+                if (c.children[0].children[0].type === 'PerspectiveCamera') {
+                    myPlayer = c;
+                } else {
+                    players.push(c);
+                }
+            }
+        } catch (e) {}
+    }
+
+    if (!myPlayer) { Array.prototype.push = injectedPush; return; }
+    if (!line.parent) myPlayer.add(line);
+
+    // Process enemies
+    let counter = 0;
+    let targetPlayer;
+    let minDist = Infinity;
+
+    tempObject.matrix.copy(myPlayer.matrix).invert();
+
+    for (let i = 0; i < players.length; i++) {
+        const p = players[i];
+
+        if (!p.box) {
+            const b = new THREE.LineSegments(geometry, material);
+            b.frustumCulled = false;
+            p.add(b);
+            p.box = b;
+        }
+
+        if (p.position.y < -100 || (p.position.x === myPlayer.position.x && p.position.z === myPlayer.position.z)) {
+            p.box.visible = false;
+            continue;
+        }
+
+        // Tracer line
+        linePositions.setXYZ(counter++, 0, 10, -5);
+        tempVector.copy(p.position); tempVector.y += 9;
+        tempVector.applyMatrix4(tempObject.matrix);
+        linePositions.setXYZ(counter++, tempVector.x, tempVector.y, tempVector.z);
+
+        p.visible = settings.espEnabled || p.visible;
+        p.box.visible = settings.espEnabled;
+
+        const d = p.position.distanceTo(myPlayer.position);
+        if (d < minDist) { targetPlayer = p; minDist = d; }
+    }
+
+    linePositions.needsUpdate = true;
+    line.geometry.setDrawRange(0, counter);
+    line.visible = settings.espLines;
+
+    // 2D overlay
+    const cam = myPlayer?.children?.[0]?.children?.[0] || null;
+    draw2D(myPlayer, players, cam, targetPlayer);
+
+    // Chams
+    if (settings.espChams) {
+        for (const p of players) {
+            p.traverse(c => {
+                if (c.isMesh && c.material) {
+                    if (!c._om) c._om = c.material;
+                    c.material = settings.espChams ? chamsMaterial : (c._om || c.material);
+                }
+            });
+        }
+    }
+
+    // Fog removal
+    if (settings.wireframe && scene.fog) scene.fog = null;
+
+    // ── AIMBOT: instant lock ──
+    if (!settings.aimbotEnabled || (settings.aimbotOnRightMouse && !rightMouseDown) || !targetPlayer) return;
+
+    tempVector.setScalar(0);
+    if (targetPlayer?.children?.[0]?.children?.[0]?.localToWorld) {
+        targetPlayer.children[0].children[0].localToWorld(tempVector);
+    } else {
+        tempVector.copy(targetPlayer.position);
+        tempVector.y += 9;
+    }
+
+    tempObject.position.copy(myPlayer.position);
+    tempObject.lookAt(tempVector);
+
+    myPlayer.children[0].rotation.x = -tempObject.rotation.x;
+    myPlayer.rotation.y = tempObject.rotation.y + Math.PI;
 }
 
-const el = document.createElement( 'div' );
-
-el.innerHTML = `<style>
-
-.dialog {
-	position: absolute;
-	left: 50%;
-	top: 50%;
-	padding: 20px;
-	background: rgba(0, 0, 0, 0.8);
-	border: 6px solid rgba(0, 0, 0, 0.2);
-	color: #fff;
-	transform: translate(-50%, -50%);
-	text-align: center;
-	z-index: 999999;
-}
-
-.dialog * {
-	color: #fff;
-}
-
-.close {
-	position: absolute;
-	right: 5px;
-	top: 5px;
-	width: 20px;
-	height: 20px;
-	opacity: 0.5;
-	cursor: pointer;
-}
-
-.close:before, .close:after {
-	content: ' ';
-	position: absolute;
-	left: 50%;
-	top: 50%;
-	width: 100%;
-	height: 20%;
-	transform: translate(-50%, -50%) rotate(-45deg);
-	background: #fff;
-}
-
-.close:after {
-	transform: translate(-50%, -50%) rotate(45deg);
-}
-
-.close:hover {
-	opacity: 1;
-}
-
-.btn {
-	cursor: pointer;
-	padding: 0.5em;
-	background: red;
-	border: 3px solid rgba(0, 0, 0, 0.2);
-}
-
-.btn:active {
-	transform: scale(0.8);
-}
-
-.msg {
-	position: absolute;
-	left: 10px;
-	bottom: 10px;
-	color: #fff;
-	background: rgba(0, 0, 0, 0.6);
-	font-weight: bolder;
-	padding: 15px;
-	animation: msg 0.5s forwards, msg 0.5s reverse forwards 3s;
-	z-index: 999999;
-	pointer-events: none;
-}
-
-@keyframes msg {
-	from {
-		transform: translate(-120%, 0);
-	}
-
-	to {
-		transform: none;
-	}
-}
-
-.zui {
-	position: fixed;
-	right: 10px;
-	top: 0;
-	z-index: 999;
-	display: flex;
-	flex-direction: column;
-	font-family: monospace;
-	font-size: 14px;
-	color: #fff;
-	width: 250px;
-	user-select: none;
-	border: 2px solid #000;
-}
-
-.zui-item {
-	padding: 5px 8px;
-	display: flex;
-	justify-content: space-between;
-	align-items: center;
-	background: #222;
-	cursor: pointer;
-}
-
-.zui-item.text {
-	justify-content: center;
-	cursor: unset;
-	text-align: center;
-	background: #333;
-}
-
-.zui-item:hover {
-	background: #333;
-}
-
-.zui-item span {
-	color: #fff;
-	font-family: monospace;
-	font-size: 14px;
-}
-
-.zui-header {
-	background: #000;
-}
-
-.zui-header span {
-	font-size: 16px;
-}
-
-.zui-header:hover {
-	background: #000;
-}
-
-.zui-on {
-	color: green;
-}
-
-.zui-item-value {
-	font-size: 0.8em;
-}
-
-.zui-content .zui-item-value {
-	font-weight: bolder;
-}
-
+// ═══════════════════════════════════════════
+// GUI
+// ═══════════════════════════════════════════
+function createGUI() {
+    const el = document.createElement('div');
+    el.innerHTML = `
+<style>
+.ag{position:fixed;right:12px;top:12px;z-index:999999;width:250px;font-family:'Courier New',monospace;font-size:11px;color:#ddd;user-select:none;background:rgba(12,12,18,0.95);border:1px solid rgba(200,50,50,0.4);border-radius:6px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,0.6)}
+.ah{background:linear-gradient(135deg,rgba(200,50,50,0.9),rgba(150,30,30,0.9));padding:10px 14px;display:flex;justify-content:space-between;align-items:center;cursor:pointer}
+.ah span{font-weight:bold;font-size:13px;color:#fff;letter-spacing:1px}
+.ah small{color:rgba(255,255,255,0.5);font-size:9px}
+.ab{padding:4px 0;max-height:400px;overflow-y:auto}
+.as{padding:6px 12px;font-size:9px;font-weight:bold;color:#c83232;text-transform:uppercase;letter-spacing:1.5px}
+.ai{display:flex;justify-content:space-between;align-items:center;padding:5px 14px;cursor:pointer;transition:background 0.1s}
+.ai:hover{background:rgba(200,50,50,0.1)}
+.ai span{font-size:11px}
+.aon{color:#2ed573;font-weight:bold}
+.aoff{color:#ff4757;font-weight:bold}
+.ab::-webkit-scrollbar{width:3px}
+.ab::-webkit-scrollbar-thumb{background:#c83232;border-radius:2px}
+.amsg{position:fixed;left:50%;bottom:80px;transform:translateX(-50%);background:rgba(12,12,18,0.9);border:1px solid #c83232;color:#fff;padding:6px 16px;border-radius:4px;font-family:monospace;font-size:12px;z-index:999999;animation:af 1.5s forwards;pointer-events:none}
+@keyframes af{0%{opacity:1}70%{opacity:1}100%{opacity:0;display:none}}
 </style>
-<div class="msg" style="display: none;"></div>
-<div class="dialog">${`<div class="close" onclick="this.parentNode.style.display='none';"></div>
-	<big>== Aimbot & ESP ==</big>
-	<br>
-	<br>
-	[B] to toggle aimbot
-	<br>
-	[V] to toggle ESP
-	<br>
-	[N] to toggle ESP Lines
-	<br>
-	[L] to toggle aimbot on <br>right mouse hold
-	<br>
-	[H] to show/hide help
-	<br>
-	<br>
-	By Zertalious
-	<br>
-	<br>
-	<div style="display: grid; grid-template-columns: 1fr 1fr; grid-gap: 5px;">
-		<div class="btn" onclick="window.open('https://discord.gg/K24Zxy88VM', '_blank')">Discord</div>
-		<div class="btn" onclick="window.open('https://www.instagram.com/zertalious/', '_blank')">Instagram</div>
-		<div class="btn" onclick="window.open('https://twitter.com/Zertalious', '_blank')">Twitter</div>
-		<div class="btn" onclick="window.open('https://greasyfork.org/en/users/662330-zertalious', '_blank')">More scripts</div>
-	</div>
-	` }
+<div class="amsg" style="display:none"></div>
+<div class="ag">
+<div class="ah" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">
+<span>NETENYAHU ARMORY</span><small>HVH</small>
+</div>
+<div class="ab"></div>
 </div>`;
 
-const msgEl = el.querySelector( '.msg' );
-const dialogEl = el.querySelector( '.dialog' );
+    const body = el.querySelector('.ab');
+    const msg = el.querySelector('.amsg');
 
-window.addEventListener( 'DOMContentLoaded', function () {
+    function showMsg(n, v) {
+        msg.innerText = n + ': ' + (v ? 'ON' : 'OFF');
+        msg.style.display = 'none';
+        void msg.offsetWidth;
+        msg.style.display = '';
+    }
 
-	while ( el.children.length > 0 ) {
+    const secs = {
+        'Aimbot': [['aimbotEnabled','Enable'], ['aimbotOnRightMouse','RMB Only']],
+        'ESP': [['espEnabled','Enable'], ['espLines','Tracers'], ['espSkeleton','Skeleton'], ['espNames','Names'], ['espDistance','Distance'], ['espChams','Chams']],
+        'Visuals': [['wireframe','Wireframe']],
+    };
 
-		document.body.appendChild( el.children[ 0 ] );
+    for (const [sec, items] of Object.entries(secs)) {
+        const s = document.createElement('div'); s.className = 'as'; s.textContent = sec;
+        body.appendChild(s);
+        for (const [key, label] of items) {
+            const row = document.createElement('div'); row.className = 'ai';
+            const nm = document.createElement('span'); nm.textContent = label;
+            const vl = document.createElement('span');
+            const upd = () => { vl.textContent = settings[key] ? 'ON' : 'OFF'; vl.className = settings[key] ? 'aon' : 'aoff'; };
+            upd();
+            row.onclick = () => { settings[key] = !settings[key]; upd(); showMsg(label, settings[key]); };
+            row.appendChild(nm); row.appendChild(vl);
+            body.appendChild(row);
+        }
+    }
 
-	}
+    const cr = document.createElement('div'); cr.className = 'ai';
+    cr.style.cssText = 'justify-content:center;color:#444;font-size:9px;cursor:default';
+    cr.textContent = 'Netenyahu Armory HVH v1.0';
+    body.appendChild(cr);
 
-	document.body.appendChild( gui );
-
-} );
-
-let rightMouseDown = false;
-
-function handleMouse( event ) {
-
-	if ( event.button === 2 ) {
-
-		rightMouseDown = event.type === 'pointerdown' ? true : false;
-
-	}
-
+    return { el, showMsg };
 }
 
-window.addEventListener( 'pointerdown', handleMouse );
-window.addEventListener( 'pointerup', handleMouse );
-
-window.addEventListener( 'keyup', function ( event ) {
-
-	if ( x.document.activeElement && x.document.activeElement.value !== undefined ) return;
-
-	if ( keyToSetting[ event.code ] ) {
-
-		toggleSetting( keyToSetting[ event.code ] );
-
-	}
-
-	switch ( event.code ) {
-
-		case 'Slash' :
-			toggleElementVisibility( gui );
-			break;
-
-		case 'KeyH' :
-			toggleElementVisibility( dialogEl );
-			break;
-
-	}
-
-} );
-
-function toggleElementVisibility( el ) {
-
-	el.style.display = el.style.display === '' ? 'none' : '';
-
+// ═══════════════════════════════════════════
+// INPUT
+// ═══════════════════════════════════════════
+function bindInput(showMsg) {
+    window.addEventListener('pointerdown', e => { if (e.button === 2) rightMouseDown = true; });
+    window.addEventListener('pointerup', e => { if (e.button === 2) rightMouseDown = false; });
+    window.addEventListener('keyup', e => {
+        if (document.activeElement?.value !== undefined) return;
+        const s = keyToSetting[e.code];
+        if (s) { settings[s] = !settings[s]; showMsg(s, settings[s]); }
+        if (e.code === 'KeyH') {
+            const g = document.querySelector('.ag');
+            if (g) g.style.display = g.style.display === 'none' ? '' : 'none';
+        }
+    });
 }
 
-function showMsg( name, bool ) {
+// ═══════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════
+window.addEventListener('DOMContentLoaded', () => {
+    x.consoleLog('[Armory] Initializing...');
+    createOverlay();
+    const { el, showMsg } = createGUI();
+    document.body.appendChild(el);
+    bindInput(showMsg);
+    animate();
+    x.consoleLog('[Armory] Ready — B:aim V:esp N:lines J:skel C:chams H:hide K:wire L:rmb');
+});
 
-	msgEl.innerText = name + ': ' + ( bool ? 'ON' : 'OFF' );
-
-	msgEl.style.display = 'none';
-	void msgEl.offsetWidth;
-	msgEl.style.display = '';
-
-}
-
-animate();
-
-function createGUI() {
-
-	const guiEl = fromHtml( `<div class="zui">
-		<div class="zui-item zui-header">
-			<span>[/] Controls</span>
-			<span class="zui-item-value">[close]</span>
-		</div>
-		<div class="zui-content"></div>
-	</div>` );
-
-	const headerEl = guiEl.querySelector( '.zui-header' );
-	const contentEl = guiEl.querySelector( '.zui-content' );
-	const headerStatusEl = guiEl.querySelector( '.zui-item-value' );
-
-	headerEl.onclick = function () {
-
-		const isHidden = contentEl.style.display === 'none';
-
-		contentEl.style.display = isHidden ? '' : 'none';
-		headerStatusEl.innerText = isHidden ? '[close]' : '[open]';
-
-	}
-
-	const settingToKey = {};
-	for ( const key in keyToSetting ) {
-
-		settingToKey[ keyToSetting[ key ] ] = key;
-
-	}
-
-	for ( const prop in settings ) {
-
-		let name = fromCamel( prop );
-		let shortKey = settingToKey[ prop ];
-
-		if ( shortKey ) {
-
-			if ( shortKey.startsWith( 'Key' ) ) shortKey = shortKey.slice( 3 );
-			name = `[${shortKey}] ${name}`;
-
-		}
-
-		const itemEl = fromHtml( `<div class="zui-item">
-			<span>${name}</span>
-			<span class="zui-item-value"></span>
-		</div>` );
-		const valueEl = itemEl.querySelector( '.zui-item-value' );
-
-		function updateValueEl() {
-
-			const value = settings[ prop ];
-			valueEl.innerText = value ? 'ON' : 'OFF';
-			valueEl.style.color = value ? 'green' : 'red';
-
-		}
-		itemEl.onclick = function() {
-
-			settings[ prop ] = ! settings[ prop ];
-
-		}
-		updateValueEl();
-
-		contentEl.appendChild( itemEl );
-
-		const p = `__${prop}`;
-		settings[ p ] = settings[ prop ];
-		Object.defineProperty( settings, prop, {
-			get() {
-
-				return this[ p ];
-
-			}, 
-			set( value ) {
-
-				this[ p ] = value;
-				updateValueEl();
-
-			}
-		} );
-
-	}
-
-	contentEl.appendChild( fromHtml( `<div class="zui-item text">
-		<span>Created by Zertalious!</span>
-	</div>` ) );
-
-	return guiEl;
-
-}
-
-function fromCamel( text ) {
-
-	const result = text.replace( /([A-Z])/g, ' $1' );
-	return result.charAt( 0 ).toUpperCase() + result.slice( 1 );
-
-}
-
-function fromHtml( html ) {
-
-	const div = document.createElement( 'div' );
-	div.innerHTML = html;
-	return div.children[ 0 ];
-
-}
-
-function toggleSetting( key ) {
-
-	settings[ key ] = ! settings[ key ];
-	showMsg( fromCamel( key ), settings[ key ] );
-
-}
+})();
