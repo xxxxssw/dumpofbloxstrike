@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Netenyahu Armory — Krunker HVH
 // @namespace    http://tampermonkey.net/
-// @version      1.0.0
-// @description  Aimbot, ESP, Tracers, Skeleton, Chams for Krunker.io. Instant lock, no smoothing, pure HVH.
+// @version      1.1.0
+// @description  Aimbot, ESP, tracers, skeleton, chams, visibility checks, and richer target intel for Krunker.io.
 // @match        *://krunker.io/*
 // @match        *://browserfps.com/*
 // @exclude      *://krunker.io/social*
@@ -15,22 +15,23 @@
 (() => {
 'use strict';
 
-// Grab THREE before Krunker deletes it
 const THREE = window.THREE;
 delete window.THREE;
 
-// ═══════════════════════════════════════════
-// SETTINGS
-// ═══════════════════════════════════════════
 const settings = {
     aimbotEnabled: true,
     aimbotOnRightMouse: false,
     espEnabled: true,
     espLines: true,
     espSkeleton: true,
+    espBoxes: true,
     espNames: true,
     espDistance: true,
+    espHealth: true,
+    espWeapon: true,
     espChams: true,
+    visCheck: true,
+    targetInfo: true,
     wireframe: false,
 };
 
@@ -40,24 +41,25 @@ const keyToSetting = {
     KeyV: 'espEnabled',
     KeyN: 'espLines',
     KeyJ: 'espSkeleton',
+    KeyU: 'espBoxes',
+    KeyI: 'espHealth',
+    KeyY: 'espWeapon',
     KeyC: 'espChams',
+    KeyO: 'visCheck',
     KeyK: 'wireframe',
 };
 
-// ═══════════════════════════════════════════
-// NATIVE CACHE (anti-tamper)
-// ═══════════════════════════════════════════
 const x = {
     consoleLog: console.log.bind(console),
     requestAnimationFrame: window.requestAnimationFrame.bind(window),
     setTimeout: window.setTimeout.bind(window),
+    now: performance.now.bind(performance),
     indexOf: String.prototype.indexOf,
     reToString: RegExp.prototype.toString,
 };
 
 x.consoleLog('[Armory] Waiting to inject...');
 
-// Protect toString from detection
 const _call = Function.prototype.call;
 Function.prototype.call = function() {
     if (this === x.reToString && x.indexOf.call(arguments[0]?.source || '', 'toString') >= 0) {
@@ -66,18 +68,12 @@ Function.prototype.call = function() {
     return _call.apply(this, arguments);
 };
 
-// ═══════════════════════════════════════════
-// SCENE INJECTION (Array.push proxy)
-// ═══════════════════════════════════════════
 let scene = null;
 const _push = Array.prototype.push;
-
 const injectedPush = function() {
     for (let i = 0; i < arguments.length; i++) {
         const obj = arguments[i];
-        if (typeof obj === 'object' && obj !== null &&
-            typeof obj.parent === 'object' && obj.parent !== null &&
-            obj.parent.type === 'Scene') {
+        if (typeof obj === 'object' && obj !== null && typeof obj.parent === 'object' && obj.parent !== null && obj.parent.type === 'Scene') {
             x.consoleLog('[Armory] Scene captured!');
             scene = obj.parent;
             Array.prototype.push = _push;
@@ -86,34 +82,26 @@ const injectedPush = function() {
     return _push.apply(this, arguments);
 };
 
-// ═══════════════════════════════════════════
-// 3D OBJECTS (ESP boxes, tracers, chams)
-// ═══════════════════════════════════════════
 const tempVector = new THREE.Vector3();
+const tempOrigin = new THREE.Vector3();
+const tempDir = new THREE.Vector3();
 const tempObject = new THREE.Object3D();
+const raycaster = new THREE.Raycaster();
+const metadataCache = new WeakMap();
 tempObject.rotation.order = 'YXZ';
+raycaster.far = 4096;
 
-const geometry = new THREE.EdgesGeometry(
-    new THREE.BoxGeometry(5, 15, 5).translate(0, 7.5, 0)
+const boxGeometry = new THREE.EdgesGeometry(new THREE.BoxGeometry(5, 15, 5).translate(0, 7.5, 0));
+const linePositions = new THREE.BufferAttribute(new Float32Array(256 * 2 * 3), 3);
+const lineColors = new THREE.BufferAttribute(new Float32Array(256 * 2 * 3), 3);
+const line = new THREE.LineSegments(
+    new THREE.BufferGeometry(),
+    new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.9, depthTest: false, toneMapped: false })
 );
-
-// RawShader: renders through walls via gl_Position.z = 1.0
-const material = new THREE.RawShaderMaterial({
-    vertexShader: `
-        attribute vec3 position;
-        uniform mat4 projectionMatrix;
-        uniform mat4 modelViewMatrix;
-        void main() {
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-            gl_Position.z = 1.0;
-        }
-    `,
-    fragmentShader: `
-        void main() {
-            gl_FragColor = vec4(0.78, 0.2, 0.2, 1.0);
-        }
-    `
-});
+line.frustumCulled = false;
+line.renderOrder = 9999;
+line.geometry.setAttribute('position', linePositions);
+line.geometry.setAttribute('color', lineColors);
 
 const chamsMaterial = new THREE.MeshBasicMaterial({
     color: 0xc83232,
@@ -124,14 +112,6 @@ const chamsMaterial = new THREE.MeshBasicMaterial({
     toneMapped: false,
 });
 
-const line = new THREE.LineSegments(new THREE.BufferGeometry(), material);
-line.frustumCulled = false;
-const linePositions = new THREE.BufferAttribute(new Float32Array(100 * 2 * 3), 3);
-line.geometry.setAttribute('position', linePositions);
-
-// ═══════════════════════════════════════════
-// OVERLAY CANVAS (2D drawing)
-// ═══════════════════════════════════════════
 let canvas2d = null;
 let ctx = null;
 
@@ -141,95 +121,305 @@ function createOverlay() {
     canvas2d.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:99999;';
     document.body.appendChild(canvas2d);
     ctx = canvas2d.getContext('2d');
-    const resize = () => { canvas2d.width = window.innerWidth; canvas2d.height = window.innerHeight; };
+    const resize = () => {
+        canvas2d.width = window.innerWidth;
+        canvas2d.height = window.innerHeight;
+    };
     resize();
     window.addEventListener('resize', resize);
 }
 
-// ═══════════════════════════════════════════
-// HELPERS
-// ═══════════════════════════════════════════
 const _pv = new THREE.Vector3();
 
 function w2s(pos, cam) {
     if (!cam || !canvas2d) return null;
     _pv.copy(pos).project(cam);
-    if (_pv.z > 1) return null;
-    return { x: (_pv.x * canvas2d.width / 2) + canvas2d.width / 2, y: -(_pv.y * canvas2d.height / 2) + canvas2d.height / 2 };
+    if (_pv.z < -1 || _pv.z > 1) return null;
+    return {
+        x: (_pv.x * canvas2d.width / 2) + canvas2d.width / 2,
+        y: -(_pv.y * canvas2d.height / 2) + canvas2d.height / 2,
+        z: _pv.z,
+    };
 }
 
-function bone(p, b) {
-    const o = p.position;
-    const m = { head:[0,11,0], neck:[0,10,0], chest:[0,8,0], pelvis:[0,5,0],
-        lshoulder:[-2.5,10,0], rshoulder:[2.5,10,0], lhand:[-3,8,0], rhand:[3,8,0],
-        lknee:[-1.5,3,0], rknee:[1.5,3,0], lfoot:[-1.5,0,0], rfoot:[1.5,0,0] };
-    const d = m[b] || [0,9,0];
-    return new THREE.Vector3(o.x + d[0], o.y + d[1], o.z + d[2]);
+function projectPlayerBounds(player, cam) {
+    const head = getAimPoint(player, 'head');
+    const feet = getAimPoint(player, 'feet');
+    const top = w2s(head, cam);
+    const bottom = w2s(feet, cam);
+    if (!top || !bottom) return null;
+    const height = Math.max(18, Math.abs(bottom.y - top.y));
+    const width = Math.max(10, height * 0.38);
+    return {
+        top,
+        bottom,
+        x: top.x - width / 2,
+        y: top.y,
+        width,
+        height,
+    };
 }
 
-const skel = [
-    ['head','neck'],['neck','chest'],['chest','pelvis'],
-    ['neck','lshoulder'],['lshoulder','lhand'],
-    ['neck','rshoulder'],['rshoulder','rhand'],
-    ['pelvis','lknee'],['lknee','lfoot'],
-    ['pelvis','rknee'],['rknee','rfoot'],
+function bone(player, part) {
+    const origin = player.position;
+    const map = {
+        head: [0, 11, 0],
+        neck: [0, 10, 0],
+        chest: [0, 8, 0],
+        pelvis: [0, 5, 0],
+        lshoulder: [-2.5, 10, 0],
+        rshoulder: [2.5, 10, 0],
+        lhand: [-3, 8, 0],
+        rhand: [3, 8, 0],
+        lknee: [-1.5, 3, 0],
+        rknee: [1.5, 3, 0],
+        lfoot: [-1.5, 0, 0],
+        rfoot: [1.5, 0, 0],
+        feet: [0, 0, 0],
+    };
+    const delta = map[part] || [0, 9, 0];
+    return new THREE.Vector3(origin.x + delta[0], origin.y + delta[1], origin.z + delta[2]);
+}
+
+const skeletonPairs = [
+    ['head', 'neck'], ['neck', 'chest'], ['chest', 'pelvis'],
+    ['neck', 'lshoulder'], ['lshoulder', 'lhand'],
+    ['neck', 'rshoulder'], ['rshoulder', 'rhand'],
+    ['pelvis', 'lknee'], ['lknee', 'lfoot'],
+    ['pelvis', 'rknee'], ['rknee', 'rfoot'],
 ];
 
-// ═══════════════════════════════════════════
-// 2D ESP (skeleton, names, distance, head dots)
-// ═══════════════════════════════════════════
-function draw2D(me, players, cam, target) {
+function getAimPoint(player, mode = 'head') {
+    const target = mode === 'feet' ? bone(player, 'feet') : bone(player, 'head');
+    const pivot = player?.children?.[0]?.children?.[0];
+    if (pivot?.localToWorld) {
+        tempVector.copy(mode === 'feet' ? bone(player, 'feet') : new THREE.Vector3());
+        if (mode === 'head') {
+            pivot.localToWorld(tempVector);
+        }
+        return tempVector.clone();
+    }
+    return target;
+}
+
+function isRenderableMesh(obj) {
+    return !!(obj && (obj.isMesh || obj.isSkinnedMesh) && obj.visible !== false && obj.geometry && obj.material);
+}
+
+function findPlayerMeta(player) {
+    const cached = metadataCache.get(player);
+    const now = x.now();
+    if (cached && now - cached.time < 750) return cached.value;
+
+    const meta = { name: null, health: null, weapon: null };
+    const seen = new Set();
+    const queue = [player];
+
+    while (queue.length && seen.size < 180) {
+        const node = queue.shift();
+        if (!node || (typeof node !== 'object' && typeof node !== 'function') || seen.has(node)) continue;
+        seen.add(node);
+
+        for (const key of Object.keys(node)) {
+            const value = node[key];
+            if (meta.health == null && typeof value === 'number' && /(?:hp|health)/i.test(key) && value >= 0 && value <= 250) {
+                meta.health = value;
+            }
+            if (!meta.name && typeof value === 'string' && /(?:name|nick|alias|player)/i.test(key) && value.length >= 2 && value.length <= 24) {
+                meta.name = value;
+            }
+            if (!meta.weapon && typeof value === 'string' && /(?:weapon|gun|class|loadout)/i.test(key) && value.length >= 2 && value.length <= 32) {
+                meta.weapon = value;
+            }
+            if ((typeof value === 'object' || typeof value === 'function') && value && seen.size < 180) {
+                queue.push(value);
+            }
+        }
+    }
+
+    if (!meta.name || /^(object|enemy)$/i.test(meta.name)) meta.name = 'Enemy';
+    metadataCache.set(player, { time: now, value: meta });
+    return meta;
+}
+
+function isDescendantOf(obj, root) {
+    let current = obj;
+    while (current) {
+        if (current === root) return true;
+        current = current.parent;
+    }
+    return false;
+}
+
+function gatherOccluders(rootScene, selfPlayer, enemyPlayer) {
+    const occluders = [];
+    rootScene.traverse(obj => {
+        if (!isRenderableMesh(obj)) return;
+        if (selfPlayer && isDescendantOf(obj, selfPlayer)) return;
+        if (enemyPlayer && isDescendantOf(obj, enemyPlayer)) return;
+        if (obj === line || isDescendantOf(obj, line)) return;
+        occluders.push(obj);
+    });
+    return occluders;
+}
+
+function isVisible(player, me, cam, rootScene) {
+    if (!settings.visCheck || !cam || !rootScene) return true;
+
+    const target = getAimPoint(player, 'head');
+    cam.getWorldPosition(tempOrigin);
+    tempDir.copy(target).sub(tempOrigin);
+    const distance = tempDir.length();
+    if (!distance) return true;
+    tempDir.normalize();
+
+    raycaster.set(tempOrigin, tempDir);
+    raycaster.far = distance;
+
+    const hits = raycaster.intersectObjects(gatherOccluders(rootScene, me, player), true);
+    return hits.length === 0 || hits[0].distance >= distance - 0.5;
+}
+
+function drawBox(x0, y0, w, h, color) {
+    const x1 = x0 + w;
+    const y1 = y0 + h;
+    const cx = Math.min(w * 0.28, 14);
+    const cy = Math.min(h * 0.2, 16);
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(x0, y0 + cy); ctx.lineTo(x0, y0); ctx.lineTo(x0 + cx, y0);
+    ctx.moveTo(x1 - cx, y0); ctx.lineTo(x1, y0); ctx.lineTo(x1, y0 + cy);
+    ctx.moveTo(x0, y1 - cy); ctx.lineTo(x0, y1); ctx.lineTo(x0 + cx, y1);
+    ctx.moveTo(x1 - cx, y1); ctx.lineTo(x1, y1); ctx.lineTo(x1, y1 - cy);
+    ctx.stroke();
+}
+
+function drawBar(x0, y0, w, pct, color) {
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.fillRect(x0, y0, w, 4);
+    ctx.fillStyle = color;
+    ctx.fillRect(x0, y0, Math.max(0, Math.min(w, w * pct)), 4);
+}
+
+function draw2D(me, players, cam, bestTarget, frameInfo) {
     if (!ctx || !canvas2d) return;
     ctx.clearRect(0, 0, canvas2d.width, canvas2d.height);
     if (!settings.espEnabled || !cam) return;
 
-    for (const p of players) {
-        const isTgt = target && p === target;
-        const dist = p.position.distanceTo(me.position);
-        const col = isTgt ? '#2ed573' : '#c83232';
+    for (const player of players) {
+        const info = frameInfo.get(player);
+        if (!info) continue;
+        const bounds = projectPlayerBounds(player, cam);
+        if (!bounds) continue;
 
-        // Skeleton
+        const color = info.isTarget ? '#2ed573' : (info.visible ? '#f1c40f' : '#c83232');
+        const meta = info.meta;
+        const distLabel = `${Math.floor(info.distance)}m`;
+
         if (settings.espSkeleton) {
-            for (const [a, b] of skel) {
-                const sa = w2s(bone(p, a), cam);
-                const sb = w2s(bone(p, b), cam);
+            for (const [a, b] of skeletonPairs) {
+                const sa = w2s(bone(player, a), cam);
+                const sb = w2s(bone(player, b), cam);
                 if (!sa || !sb) continue;
-                ctx.beginPath(); ctx.moveTo(sa.x, sa.y); ctx.lineTo(sb.x, sb.y);
-                ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(sa.x, sa.y);
+                ctx.lineTo(sb.x, sb.y);
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 1.4;
+                ctx.stroke();
             }
         }
 
-        const hs = w2s(bone(p, 'head'), cam);
-        if (!hs) continue;
+        if (settings.espBoxes) drawBox(bounds.x, bounds.y, bounds.width, bounds.height, color);
 
-        // Name
+        const textY = bounds.y - 14;
         if (settings.espNames) {
-            ctx.font = 'bold 11px monospace'; ctx.textAlign = 'center';
-            ctx.fillStyle = '#000'; ctx.fillText('Enemy', hs.x + 1, hs.y - 12);
-            ctx.fillStyle = isTgt ? '#2ed573' : '#eee'; ctx.fillText('Enemy', hs.x, hs.y - 13);
+            ctx.font = 'bold 11px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillStyle = '#000';
+            ctx.fillText(meta.name, bounds.top.x + 1, textY + 1);
+            ctx.fillStyle = '#fff';
+            ctx.fillText(meta.name, bounds.top.x, textY);
         }
 
-        // Distance
-        if (settings.espDistance) {
-            ctx.font = '10px monospace'; ctx.textAlign = 'center';
-            ctx.fillStyle = '#000'; ctx.fillText(`[${Math.floor(dist)}m]`, hs.x + 1, hs.y - 1);
-            ctx.fillStyle = '#888'; ctx.fillText(`[${Math.floor(dist)}m]`, hs.x, hs.y - 2);
+        const subParts = [];
+        if (settings.espDistance) subParts.push(distLabel);
+        if (settings.espHealth && Number.isFinite(meta.health)) subParts.push(`${Math.max(0, Math.round(meta.health))} HP`);
+        if (settings.visCheck) subParts.push(info.visible ? 'VISIBLE' : 'HIDDEN');
+        if (subParts.length) {
+            ctx.font = '10px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillStyle = '#000';
+            ctx.fillText(subParts.join(' • '), bounds.top.x + 1, bounds.y - 2 + 1);
+            ctx.fillStyle = '#bbb';
+            ctx.fillText(subParts.join(' • '), bounds.top.x, bounds.y - 2);
         }
 
-        // Head dot
-        ctx.beginPath(); ctx.arc(hs.x, hs.y, 3, 0, Math.PI * 2);
-        ctx.fillStyle = col; ctx.fill();
+        if (settings.espWeapon && meta.weapon) {
+            ctx.font = '10px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillStyle = '#000';
+            ctx.fillText(meta.weapon, bounds.bottom.x + 1, bounds.bottom.y + 13);
+            ctx.fillStyle = '#7bed9f';
+            ctx.fillText(meta.weapon, bounds.bottom.x, bounds.bottom.y + 12);
+        }
+
+        if (settings.espHealth && Number.isFinite(meta.health)) {
+            drawBar(bounds.x, bounds.bottom.y + 5, bounds.width, Math.max(0, Math.min(1, meta.health / 100)), '#2ed573');
+        }
+
+        ctx.beginPath();
+        ctx.arc(bounds.top.x, bounds.top.y, 3, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
     }
 
-    // Watermark
-    ctx.font = 'bold 13px monospace'; ctx.textAlign = 'left';
-    ctx.fillStyle = 'rgba(200,50,50,0.65)';
-    ctx.fillText('Netenyahu Armory HVH', 10, 20);
+    ctx.font = 'bold 13px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(200,50,50,0.7)';
+    ctx.fillText('Netenyahu Armory v1.1', 10, 20);
+
+    if (settings.targetInfo) {
+        const targetMeta = bestTarget ? frameInfo.get(bestTarget)?.meta : null;
+        const summary = [
+            `Enemies: ${players.length}`,
+            `Visible: ${frameInfo.visibleCount || 0}`,
+            bestTarget ? `Target: ${targetMeta?.name || 'Enemy'}` : 'Target: none',
+        ].join(' | ');
+        ctx.font = '11px monospace';
+        ctx.fillStyle = 'rgba(255,255,255,0.85)';
+        ctx.fillText(summary, 10, 38);
+    }
 }
 
-// ═══════════════════════════════════════════
-// MAIN LOOP
-// ═══════════════════════════════════════════
+function ensurePlayerBox(player) {
+    if (player.box) return player.box;
+    const box = new THREE.LineSegments(
+        boxGeometry,
+        new THREE.LineBasicMaterial({ color: 0xc83232, transparent: true, opacity: 0.9, depthTest: false, toneMapped: false })
+    );
+    box.frustumCulled = false;
+    box.renderOrder = 9998;
+    player.add(box);
+    player.box = box;
+    return box;
+}
+
+function setChams(player, enabled, visible) {
+    player.traverse(obj => {
+        if (!obj.isMesh || !obj.material) return;
+        if (!obj._armoryMaterial) obj._armoryMaterial = obj.material;
+        if (!obj._armoryChams) {
+            obj._armoryChams = chamsMaterial.clone();
+        }
+        obj._armoryChams.color.setHex(visible ? 0xf1c40f : 0xc83232);
+        obj._armoryChams.wireframe = settings.wireframe;
+        obj.material = enabled ? obj._armoryChams : obj._armoryMaterial;
+    });
+}
+
 let rightMouseDown = false;
 let injectTimer = null;
 
@@ -249,96 +439,94 @@ function animate() {
 
     if (!scene || !scene.children) return;
 
-    // Find self + enemies
     const players = [];
-    let myPlayer;
+    let myPlayer = null;
 
     for (let i = 0; i < scene.children.length; i++) {
-        const c = scene.children[i];
-        if (c.type !== 'Object3D') continue;
-        try {
-            if (c.children.length > 0) {
-                if (c.children[0].children[0].type === 'PerspectiveCamera') {
-                    myPlayer = c;
-                } else {
-                    players.push(c);
-                }
-            }
-        } catch (e) {}
+        const child = scene.children[i];
+        if (child.type !== 'Object3D' || !child.children?.length) continue;
+        const maybeCamera = child.children?.[0]?.children?.[0];
+        if (maybeCamera?.type === 'PerspectiveCamera') {
+            myPlayer = child;
+        } else {
+            players.push(child);
+        }
     }
 
-    if (!myPlayer) { Array.prototype.push = injectedPush; return; }
+    if (!myPlayer) {
+        Array.prototype.push = injectedPush;
+        return;
+    }
     if (!line.parent) myPlayer.add(line);
 
-    // Process enemies
-    let counter = 0;
-    let targetPlayer;
-    let minDist = Infinity;
-
+    const cam = myPlayer?.children?.[0]?.children?.[0] || null;
     tempObject.matrix.copy(myPlayer.matrix).invert();
 
-    for (let i = 0; i < players.length; i++) {
-        const p = players[i];
+    let counter = 0;
+    let bestTarget = null;
+    let bestVisibleTarget = null;
+    let closestAny = Infinity;
+    let closestVisible = Infinity;
+    let visibleCount = 0;
+    const frameInfo = new Map();
 
-        if (!p.box) {
-            const b = new THREE.LineSegments(geometry, material);
-            b.frustumCulled = false;
-            p.add(b);
-            p.box = b;
-        }
-
-        if (p.position.y < -100 || (p.position.x === myPlayer.position.x && p.position.z === myPlayer.position.z)) {
-            p.box.visible = false;
+    for (const player of players) {
+        const box = ensurePlayerBox(player);
+        if (player.position.y < -100 || (player.position.x === myPlayer.position.x && player.position.z === myPlayer.position.z)) {
+            box.visible = false;
+            setChams(player, false, false);
             continue;
         }
 
-        // Tracer line
-        linePositions.setXYZ(counter++, 0, 10, -5);
-        tempVector.copy(p.position); tempVector.y += 9;
+        const distance = player.position.distanceTo(myPlayer.position);
+        const visible = isVisible(player, myPlayer, cam, scene);
+        const meta = findPlayerMeta(player);
+        const info = { visible, distance, meta, isTarget: false };
+        frameInfo.set(player, info);
+        if (visible) visibleCount += 1;
+
+        tempVector.copy(player.position);
+        tempVector.y += 9;
         tempVector.applyMatrix4(tempObject.matrix);
-        linePositions.setXYZ(counter++, tempVector.x, tempVector.y, tempVector.z);
 
-        p.visible = settings.espEnabled || p.visible;
-        p.box.visible = settings.espEnabled;
+        const segmentColor = visible ? new THREE.Color(0xf1c40f) : new THREE.Color(0xc83232);
+        linePositions.setXYZ(counter, 0, 10, -5);
+        lineColors.setXYZ(counter++, segmentColor.r, segmentColor.g, segmentColor.b);
+        linePositions.setXYZ(counter, tempVector.x, tempVector.y, tempVector.z);
+        lineColors.setXYZ(counter++, segmentColor.r, segmentColor.g, segmentColor.b);
 
-        const d = p.position.distanceTo(myPlayer.position);
-        if (d < minDist) { targetPlayer = p; minDist = d; }
-    }
+        box.visible = settings.espEnabled && settings.espBoxes;
+        box.material.color.setHex(visible ? 0xf1c40f : 0xc83232);
+        player.visible = settings.espEnabled || player.visible;
+        setChams(player, settings.espEnabled && settings.espChams, visible);
 
-    linePositions.needsUpdate = true;
-    line.geometry.setDrawRange(0, counter);
-    line.visible = settings.espLines;
-
-    // 2D overlay
-    const cam = myPlayer?.children?.[0]?.children?.[0] || null;
-    draw2D(myPlayer, players, cam, targetPlayer);
-
-    // Chams
-    if (settings.espChams) {
-        for (const p of players) {
-            p.traverse(c => {
-                if (c.isMesh && c.material) {
-                    if (!c._om) c._om = c.material;
-                    c.material = settings.espChams ? chamsMaterial : (c._om || c.material);
-                }
-            });
+        if (distance < closestAny) {
+            closestAny = distance;
+            bestTarget = player;
+        }
+        if (visible && distance < closestVisible) {
+            closestVisible = distance;
+            bestVisibleTarget = player;
         }
     }
 
-    // Fog removal
+    linePositions.needsUpdate = true;
+    lineColors.needsUpdate = true;
+    line.geometry.setDrawRange(0, counter);
+    line.visible = settings.espEnabled && settings.espLines;
+
+    const lockedTarget = settings.visCheck && bestVisibleTarget ? bestVisibleTarget : bestTarget;
+    if (lockedTarget && frameInfo.has(lockedTarget)) frameInfo.get(lockedTarget).isTarget = true;
+    frameInfo.visibleCount = visibleCount;
+
+    draw2D(myPlayer, players, cam, lockedTarget, frameInfo);
+
     if (settings.wireframe && scene.fog) scene.fog = null;
 
-    // ── AIMBOT: instant lock ──
-    if (!settings.aimbotEnabled || (settings.aimbotOnRightMouse && !rightMouseDown) || !targetPlayer) return;
+    if (!settings.aimbotEnabled || (settings.aimbotOnRightMouse && !rightMouseDown) || !lockedTarget) return;
+    if (settings.visCheck && !frameInfo.get(lockedTarget)?.visible) return;
 
-    tempVector.setScalar(0);
-    if (targetPlayer?.children?.[0]?.children?.[0]?.localToWorld) {
-        targetPlayer.children[0].children[0].localToWorld(tempVector);
-    } else {
-        tempVector.copy(targetPlayer.position);
-        tempVector.y += 9;
-    }
-
+    tempVector.copy(getAimPoint(lockedTarget, 'head'));
     tempObject.position.copy(myPlayer.position);
     tempObject.lookAt(tempVector);
 
@@ -346,18 +534,15 @@ function animate() {
     myPlayer.rotation.y = tempObject.rotation.y + Math.PI;
 }
 
-// ═══════════════════════════════════════════
-// GUI
-// ═══════════════════════════════════════════
 function createGUI() {
     const el = document.createElement('div');
     el.innerHTML = `
 <style>
-.ag{position:fixed;right:12px;top:12px;z-index:999999;width:250px;font-family:'Courier New',monospace;font-size:11px;color:#ddd;user-select:none;background:rgba(12,12,18,0.95);border:1px solid rgba(200,50,50,0.4);border-radius:6px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,0.6)}
+.ag{position:fixed;right:12px;top:12px;z-index:999999;width:270px;font-family:'Courier New',monospace;font-size:11px;color:#ddd;user-select:none;background:rgba(12,12,18,0.95);border:1px solid rgba(200,50,50,0.4);border-radius:6px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,0.6)}
 .ah{background:linear-gradient(135deg,rgba(200,50,50,0.9),rgba(150,30,30,0.9));padding:10px 14px;display:flex;justify-content:space-between;align-items:center;cursor:pointer}
 .ah span{font-weight:bold;font-size:13px;color:#fff;letter-spacing:1px}
-.ah small{color:rgba(255,255,255,0.5);font-size:9px}
-.ab{padding:4px 0;max-height:400px;overflow-y:auto}
+.ah small{color:rgba(255,255,255,0.6);font-size:9px}
+.ab{padding:4px 0;max-height:420px;overflow-y:auto}
 .as{padding:6px 12px;font-size:9px;font-weight:bold;color:#c83232;text-transform:uppercase;letter-spacing:1.5px}
 .ai{display:flex;justify-content:space-between;align-items:center;padding:5px 14px;cursor:pointer;transition:background 0.1s}
 .ai:hover{background:rgba(200,50,50,0.1)}
@@ -372,7 +557,7 @@ function createGUI() {
 <div class="amsg" style="display:none"></div>
 <div class="ag">
 <div class="ah" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">
-<span>NETENYAHU ARMORY</span><small>HVH</small>
+<span>NETENYAHU ARMORY</span><small>v1.1</small>
 </div>
 <div class="ab"></div>
 </div>`;
@@ -380,62 +565,76 @@ function createGUI() {
     const body = el.querySelector('.ab');
     const msg = el.querySelector('.amsg');
 
-    function showMsg(n, v) {
-        msg.innerText = n + ': ' + (v ? 'ON' : 'OFF');
+    function showMsg(name, value) {
+        msg.innerText = `${name}: ${value ? 'ON' : 'OFF'}`;
         msg.style.display = 'none';
         void msg.offsetWidth;
         msg.style.display = '';
     }
 
-    const secs = {
-        'Aimbot': [['aimbotEnabled','Enable'], ['aimbotOnRightMouse','RMB Only']],
-        'ESP': [['espEnabled','Enable'], ['espLines','Tracers'], ['espSkeleton','Skeleton'], ['espNames','Names'], ['espDistance','Distance'], ['espChams','Chams']],
-        'Visuals': [['wireframe','Wireframe']],
+    const sections = {
+        'Aimbot': [['aimbotEnabled', 'Enable'], ['aimbotOnRightMouse', 'RMB Only'], ['visCheck', 'Visible Only']],
+        'ESP': [['espEnabled', 'Enable'], ['espLines', 'Tracers'], ['espSkeleton', 'Skeleton'], ['espBoxes', 'Boxes'], ['espNames', 'Names'], ['espDistance', 'Distance'], ['espHealth', 'Health'], ['espWeapon', 'Weapon'], ['espChams', 'Chams']],
+        'Visuals': [['targetInfo', 'Target Info'], ['wireframe', 'Wireframe']],
     };
 
-    for (const [sec, items] of Object.entries(secs)) {
-        const s = document.createElement('div'); s.className = 'as'; s.textContent = sec;
-        body.appendChild(s);
+    for (const [section, items] of Object.entries(sections)) {
+        const sectionEl = document.createElement('div');
+        sectionEl.className = 'as';
+        sectionEl.textContent = section;
+        body.appendChild(sectionEl);
+
         for (const [key, label] of items) {
-            const row = document.createElement('div'); row.className = 'ai';
-            const nm = document.createElement('span'); nm.textContent = label;
-            const vl = document.createElement('span');
-            const upd = () => { vl.textContent = settings[key] ? 'ON' : 'OFF'; vl.className = settings[key] ? 'aon' : 'aoff'; };
-            upd();
-            row.onclick = () => { settings[key] = !settings[key]; upd(); showMsg(label, settings[key]); };
-            row.appendChild(nm); row.appendChild(vl);
+            const row = document.createElement('div');
+            row.className = 'ai';
+            const nameEl = document.createElement('span');
+            nameEl.textContent = label;
+            const valueEl = document.createElement('span');
+            const update = () => {
+                valueEl.textContent = settings[key] ? 'ON' : 'OFF';
+                valueEl.className = settings[key] ? 'aon' : 'aoff';
+            };
+            update();
+            row.onclick = () => {
+                settings[key] = !settings[key];
+                update();
+                showMsg(label, settings[key]);
+            };
+            row.append(nameEl, valueEl);
             body.appendChild(row);
         }
     }
 
-    const cr = document.createElement('div'); cr.className = 'ai';
-    cr.style.cssText = 'justify-content:center;color:#444;font-size:9px;cursor:default';
-    cr.textContent = 'Netenyahu Armory HVH v1.0';
-    body.appendChild(cr);
+    const footer = document.createElement('div');
+    footer.className = 'ai';
+    footer.style.cssText = 'justify-content:center;color:#444;font-size:9px;cursor:default';
+    footer.textContent = 'B aim | O vis | U box | I hp | Y gun | H hide';
+    body.appendChild(footer);
 
     return { el, showMsg };
 }
 
-// ═══════════════════════════════════════════
-// INPUT
-// ═══════════════════════════════════════════
 function bindInput(showMsg) {
-    window.addEventListener('pointerdown', e => { if (e.button === 2) rightMouseDown = true; });
-    window.addEventListener('pointerup', e => { if (e.button === 2) rightMouseDown = false; });
-    window.addEventListener('keyup', e => {
+    window.addEventListener('pointerdown', event => {
+        if (event.button === 2) rightMouseDown = true;
+    });
+    window.addEventListener('pointerup', event => {
+        if (event.button === 2) rightMouseDown = false;
+    });
+    window.addEventListener('keyup', event => {
         if (document.activeElement?.value !== undefined) return;
-        const s = keyToSetting[e.code];
-        if (s) { settings[s] = !settings[s]; showMsg(s, settings[s]); }
-        if (e.code === 'KeyH') {
-            const g = document.querySelector('.ag');
-            if (g) g.style.display = g.style.display === 'none' ? '' : 'none';
+        const setting = keyToSetting[event.code];
+        if (setting) {
+            settings[setting] = !settings[setting];
+            showMsg(setting, settings[setting]);
+        }
+        if (event.code === 'KeyH') {
+            const gui = document.querySelector('.ag');
+            if (gui) gui.style.display = gui.style.display === 'none' ? '' : 'none';
         }
     });
 }
 
-// ═══════════════════════════════════════════
-// INIT
-// ═══════════════════════════════════════════
 window.addEventListener('DOMContentLoaded', () => {
     x.consoleLog('[Armory] Initializing...');
     createOverlay();
@@ -443,7 +642,7 @@ window.addEventListener('DOMContentLoaded', () => {
     document.body.appendChild(el);
     bindInput(showMsg);
     animate();
-    x.consoleLog('[Armory] Ready — B:aim V:esp N:lines J:skel C:chams H:hide K:wire L:rmb');
+    x.consoleLog('[Armory] Ready — B:aim V:esp N:lines J:skel U:box I:hp Y:weapon C:chams O:vis K:wire H:hide L:rmb');
 });
 
 })();
