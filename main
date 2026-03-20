@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Netenyahu Armory — Krunker HVH
 // @namespace    http://tampermonkey.net/
-// @version      1.1.0
-// @description  Aimbot, ESP, tracers, skeleton, chams, visibility checks, and richer target intel for Krunker.io.
+// @version      1.2.0
+// @description  Aimbot, ESP, skeleton, chams, cached visibility checks, and FOV circle for Krunker.io.
 // @match        *://krunker.io/*
 // @match        *://browserfps.com/*
 // @exclude      *://krunker.io/social*
@@ -22,7 +22,6 @@ const settings = {
     aimbotEnabled: true,
     aimbotOnRightMouse: false,
     espEnabled: true,
-    espLines: true,
     espSkeleton: true,
     espBoxes: true,
     espNames: true,
@@ -32,20 +31,22 @@ const settings = {
     espChams: true,
     visCheck: true,
     targetInfo: true,
+    fovCircle: true,
+    fovRadius: 180,
     wireframe: false,
 };
 
 const keyToSetting = {
     KeyB: 'aimbotEnabled',
     KeyL: 'aimbotOnRightMouse',
-    KeyV: 'espEnabled',
-    KeyN: 'espLines',
     KeyJ: 'espSkeleton',
     KeyU: 'espBoxes',
     KeyI: 'espHealth',
     KeyY: 'espWeapon',
     KeyC: 'espChams',
     KeyO: 'visCheck',
+    KeyP: 'fovCircle',
+    KeyV: 'espEnabled',
     KeyK: 'wireframe',
 };
 
@@ -57,6 +58,9 @@ const x = {
     indexOf: String.prototype.indexOf,
     reToString: RegExp.prototype.toString,
 };
+
+const VIS_CACHE_MS = 180;
+const META_CACHE_MS = 750;
 
 x.consoleLog('[Armory] Waiting to inject...');
 
@@ -88,21 +92,11 @@ const tempDir = new THREE.Vector3();
 const tempObject = new THREE.Object3D();
 const raycaster = new THREE.Raycaster();
 const metadataCache = new WeakMap();
+const visibilityCache = new WeakMap();
 tempObject.rotation.order = 'YXZ';
 raycaster.far = 4096;
 
 const boxGeometry = new THREE.EdgesGeometry(new THREE.BoxGeometry(5, 15, 5).translate(0, 7.5, 0));
-const linePositions = new THREE.BufferAttribute(new Float32Array(256 * 2 * 3), 3);
-const lineColors = new THREE.BufferAttribute(new Float32Array(256 * 2 * 3), 3);
-const line = new THREE.LineSegments(
-    new THREE.BufferGeometry(),
-    new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.9, depthTest: false, toneMapped: false })
-);
-line.frustumCulled = false;
-line.renderOrder = 9999;
-line.geometry.setAttribute('position', linePositions);
-line.geometry.setAttribute('color', lineColors);
-
 const chamsMaterial = new THREE.MeshBasicMaterial({
     color: 0xc83232,
     wireframe: false,
@@ -129,34 +123,16 @@ function createOverlay() {
     window.addEventListener('resize', resize);
 }
 
-const _pv = new THREE.Vector3();
+const projectedVector = new THREE.Vector3();
 
 function w2s(pos, cam) {
     if (!cam || !canvas2d) return null;
-    _pv.copy(pos).project(cam);
-    if (_pv.z < -1 || _pv.z > 1) return null;
+    projectedVector.copy(pos).project(cam);
+    if (projectedVector.z < -1 || projectedVector.z > 1) return null;
     return {
-        x: (_pv.x * canvas2d.width / 2) + canvas2d.width / 2,
-        y: -(_pv.y * canvas2d.height / 2) + canvas2d.height / 2,
-        z: _pv.z,
-    };
-}
-
-function projectPlayerBounds(player, cam) {
-    const head = getAimPoint(player, 'head');
-    const feet = getAimPoint(player, 'feet');
-    const top = w2s(head, cam);
-    const bottom = w2s(feet, cam);
-    if (!top || !bottom) return null;
-    const height = Math.max(18, Math.abs(bottom.y - top.y));
-    const width = Math.max(10, height * 0.38);
-    return {
-        top,
-        bottom,
-        x: top.x - width / 2,
-        y: top.y,
-        width,
-        height,
+        x: (projectedVector.x * canvas2d.width / 2) + canvas2d.width / 2,
+        y: -(projectedVector.y * canvas2d.height / 2) + canvas2d.height / 2,
+        z: projectedVector.z,
     };
 }
 
@@ -190,16 +166,41 @@ const skeletonPairs = [
 ];
 
 function getAimPoint(player, mode = 'head') {
-    const target = mode === 'feet' ? bone(player, 'feet') : bone(player, 'head');
+    const fallback = mode === 'feet' ? bone(player, 'feet') : bone(player, 'head');
     const pivot = player?.children?.[0]?.children?.[0];
-    if (pivot?.localToWorld) {
-        tempVector.copy(mode === 'feet' ? bone(player, 'feet') : new THREE.Vector3());
-        if (mode === 'head') {
-            pivot.localToWorld(tempVector);
-        }
+    if (!pivot?.localToWorld) return fallback;
+
+    if (mode === 'head') {
+        tempVector.set(0, 0, 0);
+        pivot.localToWorld(tempVector);
         return tempVector.clone();
     }
-    return target;
+
+    return fallback;
+}
+
+function projectPlayerBounds(player, cam) {
+    const head = getAimPoint(player, 'head');
+    const feet = getAimPoint(player, 'feet');
+    const top = w2s(head, cam);
+    const bottom = w2s(feet, cam);
+    if (!top || !bottom) return null;
+
+    const height = Math.max(18, Math.abs(bottom.y - top.y));
+    const width = Math.max(10, height * 0.38);
+    const centerX = top.x;
+    const centerY = canvas2d.height / 2;
+    const fovDistance = Math.hypot(centerX - canvas2d.width / 2, top.y - centerY);
+
+    return {
+        top,
+        bottom,
+        x: top.x - width / 2,
+        y: top.y,
+        width,
+        height,
+        fovDistance,
+    };
 }
 
 function isRenderableMesh(obj) {
@@ -209,7 +210,7 @@ function isRenderableMesh(obj) {
 function findPlayerMeta(player) {
     const cached = metadataCache.get(player);
     const now = x.now();
-    if (cached && now - cached.time < 750) return cached.value;
+    if (cached && now - cached.time < META_CACHE_MS) return cached.value;
 
     const meta = { name: null, health: null, weapon: null };
     const seen = new Set();
@@ -257,13 +258,12 @@ function gatherOccluders(rootScene, selfPlayer, enemyPlayer) {
         if (!isRenderableMesh(obj)) return;
         if (selfPlayer && isDescendantOf(obj, selfPlayer)) return;
         if (enemyPlayer && isDescendantOf(obj, enemyPlayer)) return;
-        if (obj === line || isDescendantOf(obj, line)) return;
         occluders.push(obj);
     });
     return occluders;
 }
 
-function isVisible(player, me, cam, rootScene) {
+function computeVisibility(player, me, cam, rootScene) {
     if (!settings.visCheck || !cam || !rootScene) return true;
 
     const target = getAimPoint(player, 'head');
@@ -278,6 +278,19 @@ function isVisible(player, me, cam, rootScene) {
 
     const hits = raycaster.intersectObjects(gatherOccluders(rootScene, me, player), true);
     return hits.length === 0 || hits[0].distance >= distance - 0.5;
+}
+
+function getVisibility(player, me, cam, rootScene, shouldRefresh) {
+    if (!settings.visCheck || !cam || !rootScene) return true;
+
+    const now = x.now();
+    const cached = visibilityCache.get(player);
+    if (!shouldRefresh && cached) return cached.value;
+    if (cached && now - cached.time < VIS_CACHE_MS) return cached.value;
+
+    const value = computeVisibility(player, me, cam, rootScene);
+    visibilityCache.set(player, { time: now, value });
+    return value;
 }
 
 function drawBox(x0, y0, w, h, color) {
@@ -303,19 +316,29 @@ function drawBar(x0, y0, w, pct, color) {
     ctx.fillRect(x0, y0, Math.max(0, Math.min(w, w * pct)), 4);
 }
 
-function draw2D(me, players, cam, bestTarget, frameInfo) {
+function drawFovCircle() {
+    if (!settings.fovCircle || !canvas2d || !ctx) return;
+
+    const cx = canvas2d.width / 2;
+    const cy = canvas2d.height / 2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, settings.fovRadius, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(46,213,115,0.7)';
+    ctx.lineWidth = 1.25;
+    ctx.stroke();
+}
+
+function draw2D(players, cam, bestTarget, frameInfo) {
     if (!ctx || !canvas2d) return;
     ctx.clearRect(0, 0, canvas2d.width, canvas2d.height);
+    drawFovCircle();
     if (!settings.espEnabled || !cam) return;
 
     for (const player of players) {
         const info = frameInfo.get(player);
-        if (!info) continue;
-        const bounds = projectPlayerBounds(player, cam);
-        if (!bounds) continue;
-
+        if (!info?.bounds) continue;
+        const { bounds, meta } = info;
         const color = info.isTarget ? '#2ed573' : (info.visible ? '#f1c40f' : '#c83232');
-        const meta = info.meta;
         const distLabel = `${Math.floor(info.distance)}m`;
 
         if (settings.espSkeleton) {
@@ -334,14 +357,14 @@ function draw2D(me, players, cam, bestTarget, frameInfo) {
 
         if (settings.espBoxes) drawBox(bounds.x, bounds.y, bounds.width, bounds.height, color);
 
-        const textY = bounds.y - 14;
+        const nameY = bounds.y - 14;
         if (settings.espNames) {
             ctx.font = 'bold 11px monospace';
             ctx.textAlign = 'center';
             ctx.fillStyle = '#000';
-            ctx.fillText(meta.name, bounds.top.x + 1, textY + 1);
+            ctx.fillText(meta.name, bounds.top.x + 1, nameY + 1);
             ctx.fillStyle = '#fff';
-            ctx.fillText(meta.name, bounds.top.x, textY);
+            ctx.fillText(meta.name, bounds.top.x, nameY);
         }
 
         const subParts = [];
@@ -349,12 +372,13 @@ function draw2D(me, players, cam, bestTarget, frameInfo) {
         if (settings.espHealth && Number.isFinite(meta.health)) subParts.push(`${Math.max(0, Math.round(meta.health))} HP`);
         if (settings.visCheck) subParts.push(info.visible ? 'VISIBLE' : 'HIDDEN');
         if (subParts.length) {
+            const subLine = subParts.join(' • ');
             ctx.font = '10px monospace';
             ctx.textAlign = 'center';
             ctx.fillStyle = '#000';
-            ctx.fillText(subParts.join(' • '), bounds.top.x + 1, bounds.y - 2 + 1);
+            ctx.fillText(subLine, bounds.top.x + 1, bounds.y - 1);
             ctx.fillStyle = '#bbb';
-            ctx.fillText(subParts.join(' • '), bounds.top.x, bounds.y - 2);
+            ctx.fillText(subLine, bounds.top.x, bounds.y - 2);
         }
 
         if (settings.espWeapon && meta.weapon) {
@@ -379,13 +403,14 @@ function draw2D(me, players, cam, bestTarget, frameInfo) {
     ctx.font = 'bold 13px monospace';
     ctx.textAlign = 'left';
     ctx.fillStyle = 'rgba(200,50,50,0.7)';
-    ctx.fillText('Netenyahu Armory v1.1', 10, 20);
+    ctx.fillText('Netenyahu Armory v1.2', 10, 20);
 
     if (settings.targetInfo) {
         const targetMeta = bestTarget ? frameInfo.get(bestTarget)?.meta : null;
         const summary = [
             `Enemies: ${players.length}`,
             `Visible: ${frameInfo.visibleCount || 0}`,
+            `FOV: ${settings.fovRadius}`,
             bestTarget ? `Target: ${targetMeta?.name || 'Enemy'}` : 'Target: none',
         ].join(' | ');
         ctx.font = '11px monospace';
@@ -411,9 +436,7 @@ function setChams(player, enabled, visible) {
     player.traverse(obj => {
         if (!obj.isMesh || !obj.material) return;
         if (!obj._armoryMaterial) obj._armoryMaterial = obj.material;
-        if (!obj._armoryChams) {
-            obj._armoryChams = chamsMaterial.clone();
-        }
+        if (!obj._armoryChams) obj._armoryChams = chamsMaterial.clone();
         obj._armoryChams.color.setHex(visible ? 0xf1c40f : 0xc83232);
         obj._armoryChams.wireframe = settings.wireframe;
         obj.material = enabled ? obj._armoryChams : obj._armoryMaterial;
@@ -422,6 +445,7 @@ function setChams(player, enabled, visible) {
 
 let rightMouseDown = false;
 let injectTimer = null;
+let visibilityRoundRobin = 0;
 
 function animate() {
     x.requestAnimationFrame(animate);
@@ -457,20 +481,25 @@ function animate() {
         Array.prototype.push = injectedPush;
         return;
     }
-    if (!line.parent) myPlayer.add(line);
 
     const cam = myPlayer?.children?.[0]?.children?.[0] || null;
-    tempObject.matrix.copy(myPlayer.matrix).invert();
-
-    let counter = 0;
+    const screenCenterX = canvas2d ? canvas2d.width / 2 : 0;
+    const screenCenterY = canvas2d ? canvas2d.height / 2 : 0;
     let bestTarget = null;
     let bestVisibleTarget = null;
+    let bestFovTarget = null;
+    let bestVisibleFovTarget = null;
     let closestAny = Infinity;
     let closestVisible = Infinity;
+    let closestFov = Infinity;
+    let closestVisibleFov = Infinity;
     let visibleCount = 0;
     const frameInfo = new Map();
 
-    for (const player of players) {
+    visibilityRoundRobin += 1;
+
+    for (let index = 0; index < players.length; index++) {
+        const player = players[index];
         const box = ensurePlayerBox(player);
         if (player.position.y < -100 || (player.position.x === myPlayer.position.x && player.position.z === myPlayer.position.z)) {
             box.visible = false;
@@ -478,22 +507,16 @@ function animate() {
             continue;
         }
 
+        const bounds = cam ? projectPlayerBounds(player, cam) : null;
         const distance = player.position.distanceTo(myPlayer.position);
-        const visible = isVisible(player, myPlayer, cam, scene);
+        const screenDistance = bounds ? Math.hypot(bounds.top.x - screenCenterX, bounds.top.y - screenCenterY) : Infinity;
+        const inFov = !settings.fovCircle || !bounds || screenDistance <= settings.fovRadius;
+        const shouldRefreshVisibility = settings.visCheck && ((visibilityRoundRobin + index) % 3 === 0 || !visibilityCache.has(player));
+        const visible = getVisibility(player, myPlayer, cam, scene, shouldRefreshVisibility);
         const meta = findPlayerMeta(player);
-        const info = { visible, distance, meta, isTarget: false };
+        const info = { bounds, visible, distance, screenDistance, inFov, meta, isTarget: false };
         frameInfo.set(player, info);
         if (visible) visibleCount += 1;
-
-        tempVector.copy(player.position);
-        tempVector.y += 9;
-        tempVector.applyMatrix4(tempObject.matrix);
-
-        const segmentColor = visible ? new THREE.Color(0xf1c40f) : new THREE.Color(0xc83232);
-        linePositions.setXYZ(counter, 0, 10, -5);
-        lineColors.setXYZ(counter++, segmentColor.r, segmentColor.g, segmentColor.b);
-        linePositions.setXYZ(counter, tempVector.x, tempVector.y, tempVector.z);
-        lineColors.setXYZ(counter++, segmentColor.r, segmentColor.g, segmentColor.b);
 
         box.visible = settings.espEnabled && settings.espBoxes;
         box.material.color.setHex(visible ? 0xf1c40f : 0xc83232);
@@ -508,23 +531,30 @@ function animate() {
             closestVisible = distance;
             bestVisibleTarget = player;
         }
+        if (inFov && screenDistance < closestFov) {
+            closestFov = screenDistance;
+            bestFovTarget = player;
+        }
+        if (visible && inFov && screenDistance < closestVisibleFov) {
+            closestVisibleFov = screenDistance;
+            bestVisibleFovTarget = player;
+        }
     }
 
-    linePositions.needsUpdate = true;
-    lineColors.needsUpdate = true;
-    line.geometry.setDrawRange(0, counter);
-    line.visible = settings.espEnabled && settings.espLines;
+    const lockedTarget = settings.fovCircle
+        ? ((settings.visCheck && bestVisibleFovTarget) || bestFovTarget || (settings.visCheck ? bestVisibleTarget : bestTarget))
+        : ((settings.visCheck && bestVisibleTarget) || bestTarget);
 
-    const lockedTarget = settings.visCheck && bestVisibleTarget ? bestVisibleTarget : bestTarget;
     if (lockedTarget && frameInfo.has(lockedTarget)) frameInfo.get(lockedTarget).isTarget = true;
     frameInfo.visibleCount = visibleCount;
 
-    draw2D(myPlayer, players, cam, lockedTarget, frameInfo);
+    draw2D(players, cam, lockedTarget, frameInfo);
 
     if (settings.wireframe && scene.fog) scene.fog = null;
 
     if (!settings.aimbotEnabled || (settings.aimbotOnRightMouse && !rightMouseDown) || !lockedTarget) return;
     if (settings.visCheck && !frameInfo.get(lockedTarget)?.visible) return;
+    if (settings.fovCircle && !frameInfo.get(lockedTarget)?.inFov) return;
 
     tempVector.copy(getAimPoint(lockedTarget, 'head'));
     tempObject.position.copy(myPlayer.position);
@@ -557,7 +587,7 @@ function createGUI() {
 <div class="amsg" style="display:none"></div>
 <div class="ag">
 <div class="ah" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">
-<span>NETENYAHU ARMORY</span><small>v1.1</small>
+<span>NETENYAHU ARMORY</span><small>v1.2</small>
 </div>
 <div class="ab"></div>
 </div>`;
@@ -573,8 +603,8 @@ function createGUI() {
     }
 
     const sections = {
-        'Aimbot': [['aimbotEnabled', 'Enable'], ['aimbotOnRightMouse', 'RMB Only'], ['visCheck', 'Visible Only']],
-        'ESP': [['espEnabled', 'Enable'], ['espLines', 'Tracers'], ['espSkeleton', 'Skeleton'], ['espBoxes', 'Boxes'], ['espNames', 'Names'], ['espDistance', 'Distance'], ['espHealth', 'Health'], ['espWeapon', 'Weapon'], ['espChams', 'Chams']],
+        'Aimbot': [['aimbotEnabled', 'Enable'], ['aimbotOnRightMouse', 'RMB Only'], ['visCheck', 'Visible Only'], ['fovCircle', 'FOV Circle']],
+        'ESP': [['espEnabled', 'Enable'], ['espSkeleton', 'Skeleton'], ['espBoxes', 'Boxes'], ['espNames', 'Names'], ['espDistance', 'Distance'], ['espHealth', 'Health'], ['espWeapon', 'Weapon'], ['espChams', 'Chams']],
         'Visuals': [['targetInfo', 'Target Info'], ['wireframe', 'Wireframe']],
     };
 
@@ -608,7 +638,7 @@ function createGUI() {
     const footer = document.createElement('div');
     footer.className = 'ai';
     footer.style.cssText = 'justify-content:center;color:#444;font-size:9px;cursor:default';
-    footer.textContent = 'B aim | O vis | U box | I hp | Y gun | H hide';
+    footer.textContent = 'B aim | O vis | P fov | U box | I hp | Y gun | H hide';
     body.appendChild(footer);
 
     return { el, showMsg };
@@ -628,6 +658,14 @@ function bindInput(showMsg) {
             settings[setting] = !settings[setting];
             showMsg(setting, settings[setting]);
         }
+        if (event.code === 'BracketRight') {
+            settings.fovRadius = Math.min(400, settings.fovRadius + 10);
+            showMsg(`FOV ${settings.fovRadius}`, true);
+        }
+        if (event.code === 'BracketLeft') {
+            settings.fovRadius = Math.max(40, settings.fovRadius - 10);
+            showMsg(`FOV ${settings.fovRadius}`, true);
+        }
         if (event.code === 'KeyH') {
             const gui = document.querySelector('.ag');
             if (gui) gui.style.display = gui.style.display === 'none' ? '' : 'none';
@@ -642,7 +680,7 @@ window.addEventListener('DOMContentLoaded', () => {
     document.body.appendChild(el);
     bindInput(showMsg);
     animate();
-    x.consoleLog('[Armory] Ready — B:aim V:esp N:lines J:skel U:box I:hp Y:weapon C:chams O:vis K:wire H:hide L:rmb');
+    x.consoleLog('[Armory] Ready — B:aim V:esp J:skel U:box I:hp Y:weapon C:chams O:vis P:fov [:less ]:more K:wire H:hide L:rmb');
 });
 
 })();
